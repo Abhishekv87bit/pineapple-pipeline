@@ -25,8 +25,10 @@ CURRENT_VERSION = "1.0.0"
 # Config models
 # ---------------------------------------------------------------------------
 
+
 class ServiceConfig(BaseModel):
     """URLs for external services."""
+
     langfuse_url: str = "http://localhost:3000"
     mem0_url: str = "http://localhost:8080"
     neo4j_url: str = "bolt://localhost:7687"
@@ -34,6 +36,7 @@ class ServiceConfig(BaseModel):
 
 class DefaultsConfig(BaseModel):
     """Pipeline execution defaults."""
+
     max_concurrent_runs: int = 3
     wall_clock_timeout_hours: float = 4.0
     cost_ceiling_usd: float = 200.0
@@ -42,6 +45,7 @@ class DefaultsConfig(BaseModel):
 
 class PineappleConfig(BaseModel):
     """Top-level pipeline configuration."""
+
     version: str = CURRENT_VERSION
     services: ServiceConfig = ServiceConfig()
     defaults: DefaultsConfig = DefaultsConfig()
@@ -52,10 +56,12 @@ class PineappleConfig(BaseModel):
 # YAML helpers
 # ---------------------------------------------------------------------------
 
+
 def _try_import_yaml():
     """Import PyYAML, returning the module or None."""
     try:
         import yaml
+
         return yaml
     except ImportError:
         warnings.warn(
@@ -96,6 +102,7 @@ def _load_yaml(path: Path) -> dict:
 # Merge / migrate helpers
 # ---------------------------------------------------------------------------
 
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge *override* into *base*.
 
@@ -105,11 +112,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
     """
     merged = base.copy()
     for key, value in override.items():
-        if (
-            key in merged
-            and isinstance(merged[key], dict)
-            and isinstance(value, dict)
-        ):
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
             merged[key] = _deep_merge(merged[key], value)
         else:
             merged[key] = value
@@ -134,6 +137,7 @@ def _migrate_config(raw: dict, from_version: str) -> dict:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def load_config(project_path: Path | None = None) -> PineappleConfig:
     """Load, merge, validate, and return a PineappleConfig.

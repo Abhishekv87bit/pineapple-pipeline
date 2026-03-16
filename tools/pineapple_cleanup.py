@@ -8,15 +8,16 @@ Checks:
   2. Pipeline runs: FAILED or EVOLVE (completed) and >7 days old
   3. Verification records: older than 30 days
 """
+
 from __future__ import annotations
 import json
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Literal
+
 
 @dataclass
 class CleanupItem:
@@ -24,6 +25,7 @@ class CleanupItem:
     path: str
     reason: str
     age_days: float = 0
+
 
 @dataclass
 class CleanupReport:
@@ -41,6 +43,7 @@ class CleanupReport:
                 for i in self.items
             ],
         }
+
 
 def find_stale_runs(project_path: Path, max_age_days: float = 7.0) -> list[CleanupItem]:
     """Find completed or failed pipeline runs older than max_age_days."""
@@ -67,15 +70,18 @@ def find_stale_runs(project_path: Path, max_age_days: float = 7.0) -> list[Clean
                 age_seconds = now - updated_dt.timestamp()
                 age_days = age_seconds / 86400
                 if age_days > max_age_days:
-                    items.append(CleanupItem(
-                        category="run",
-                        path=str(run_dir),
-                        reason=f"{stage} run, {age_days:.0f} days old",
-                        age_days=age_days,
-                    ))
+                    items.append(
+                        CleanupItem(
+                            category="run",
+                            path=str(run_dir),
+                            reason=f"{stage} run, {age_days:.0f} days old",
+                            age_days=age_days,
+                        )
+                    )
         except Exception:
             continue
     return items
+
 
 def find_stale_verify_records(project_path: Path, max_age_days: float = 30.0) -> list[CleanupItem]:
     """Find verification records older than max_age_days."""
@@ -94,15 +100,18 @@ def find_stale_verify_records(project_path: Path, max_age_days: float = 30.0) ->
                 age_seconds = now - dt.timestamp()
                 age_days = age_seconds / 86400
                 if age_days > max_age_days:
-                    items.append(CleanupItem(
-                        category="verify_record",
-                        path=str(record_path),
-                        reason=f"Verification record {age_days:.0f} days old",
-                        age_days=age_days,
-                    ))
+                    items.append(
+                        CleanupItem(
+                            category="verify_record",
+                            path=str(record_path),
+                            reason=f"Verification record {age_days:.0f} days old",
+                            age_days=age_days,
+                        )
+                    )
         except Exception:
             continue
     return items
+
 
 def find_stale_worktrees(project_path: Path) -> list[CleanupItem]:
     """Find stale git worktrees."""
@@ -111,7 +120,9 @@ def find_stale_worktrees(project_path: Path) -> list[CleanupItem]:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             cwd=str(project_path),
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0:
             return []
@@ -139,23 +150,28 @@ def find_stale_worktrees(project_path: Path) -> list[CleanupItem]:
                         age_result = subprocess.run(
                             ["git", "log", "-1", "--format=%ct"],
                             cwd=str(wt_path),
-                            capture_output=True, text=True, timeout=5,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
                         )
                         if age_result.returncode == 0 and age_result.stdout.strip():
                             commit_ts = int(age_result.stdout.strip())
                             age_days = (time.time() - commit_ts) / 86400
                             if age_days > 14:
-                                items.append(CleanupItem(
-                                    category="worktree",
-                                    path=str(wt_path),
-                                    reason=f"No commits in {age_days:.0f} days",
-                                    age_days=age_days,
-                                ))
+                                items.append(
+                                    CleanupItem(
+                                        category="worktree",
+                                        path=str(wt_path),
+                                        reason=f"No commits in {age_days:.0f} days",
+                                        age_days=age_days,
+                                    )
+                                )
                     except Exception:
                         pass
     except Exception:
         pass
     return items
+
 
 def run_cleanup(project_path: Path, dry_run: bool = True) -> CleanupReport:
     """Find and optionally remove stale artifacts."""
@@ -167,6 +183,7 @@ def run_cleanup(project_path: Path, dry_run: bool = True) -> CleanupReport:
 
     if not dry_run:
         import shutil
+
         for item in report.items:
             try:
                 p = Path(item.path)
@@ -174,14 +191,15 @@ def run_cleanup(project_path: Path, dry_run: bool = True) -> CleanupReport:
                     subprocess.run(
                         ["git", "worktree", "remove", str(p)],
                         cwd=str(project_path),
-                        capture_output=True, timeout=10,
+                        capture_output=True,
+                        timeout=10,
                     )
                 elif p.is_dir():
                     shutil.rmtree(p)
                 elif p.is_file():
                     p.unlink()
                 report.removed.append(item.path)
-            except Exception as e:
+            except Exception:
                 pass  # Log but continue
 
     return report
@@ -189,6 +207,7 @@ def run_cleanup(project_path: Path, dry_run: bool = True) -> CleanupReport:
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Pineapple Pipeline Cleanup")
     parser.add_argument("project_path", type=Path, help="Project path")
     parser.add_argument("--dry-run", action="store_true", default=True, help="Show what would be removed (default)")
@@ -203,7 +222,7 @@ if __name__ == "__main__":
         print(json.dumps(report.to_dict(), indent=2))
     else:
         print(f"\nPineapple Cleanup v1.0.0 {'(DRY RUN)' if dry_run else ''}")
-        print(f"========================")
+        print("========================")
         if not report.items:
             print("  No stale artifacts found.")
         for item in report.items:

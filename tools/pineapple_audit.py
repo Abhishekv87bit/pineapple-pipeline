@@ -9,8 +9,8 @@ Checks:
   3. Pipeline tools: all required tools present in tools/
   4. Config: load and validate PineappleConfig
 """
+
 from __future__ import annotations
-import glob
 import hashlib
 import json
 import logging
@@ -21,12 +21,14 @@ from typing import Literal
 
 logger = logging.getLogger("pineapple.audit")
 
+
 @dataclass
 class AuditCheck:
     name: str
     status: Literal["pass", "fail", "warn"]
     message: str
     details: list[str] = field(default_factory=list)
+
 
 @dataclass
 class AuditReport:
@@ -48,10 +50,10 @@ class AuditReport:
             "compliance_score": self.compliance_score,
             "overall": "pass" if self.overall_pass else "fail",
             "checks": [
-                {"name": c.name, "status": c.status, "message": c.message, "details": c.details}
-                for c in self.checks
+                {"name": c.name, "status": c.status, "message": c.message, "details": c.details} for c in self.checks
             ],
         }
+
 
 def audit_hookify_rules() -> AuditCheck:
     """Check hookify rules are present and sufficient."""
@@ -62,10 +64,15 @@ def audit_hookify_rules() -> AuditCheck:
     if len(rules) >= 16 and len(pineapple_rules) >= 5:
         return AuditCheck("Hookify rules", "pass", f"{len(rules)} rules ({len(pineapple_rules)} pineapple)")
     elif len(rules) >= 11:
-        return AuditCheck("Hookify rules", "warn", f"{len(rules)} rules but only {len(pineapple_rules)} pineapple gates",
-                         details=[f"Expected 5 pineapple gates, found {len(pineapple_rules)}"])
+        return AuditCheck(
+            "Hookify rules",
+            "warn",
+            f"{len(rules)} rules but only {len(pineapple_rules)} pineapple gates",
+            details=[f"Expected 5 pineapple gates, found {len(pineapple_rules)}"],
+        )
     else:
         return AuditCheck("Hookify rules", "fail", f"Only {len(rules)} rules (expected >= 16)")
+
 
 def audit_verification_records(project_path: Path) -> AuditCheck:
     """Check all verification records have valid integrity hashes."""
@@ -93,16 +100,25 @@ def audit_verification_records(project_path: Path) -> AuditCheck:
             invalid.append(f"{record_path.name} (error: {e})")
 
     if invalid:
-        return AuditCheck("Verification records", "fail", f"{len(invalid)}/{len(records)} records have invalid integrity",
-                         details=invalid)
+        return AuditCheck(
+            "Verification records",
+            "fail",
+            f"{len(invalid)}/{len(records)} records have invalid integrity",
+            details=invalid,
+        )
     return AuditCheck("Verification records", "pass", f"{valid}/{len(records)} records valid")
+
 
 def audit_pipeline_tools() -> AuditCheck:
     """Check all required pipeline tools are present."""
     tools_dir = Path(__file__).parent
     required = [
-        "apply_pipeline.py", "pipeline_state.py", "pineapple_config.py",
-        "pineapple_doctor.py", "pineapple_verify.py", "pineapple_evolve.py",
+        "apply_pipeline.py",
+        "pipeline_state.py",
+        "pineapple_config.py",
+        "pineapple_doctor.py",
+        "pineapple_verify.py",
+        "pineapple_evolve.py",
         "pipeline_tracer.py",
     ]
     missing = [t for t in required if not (tools_dir / t).is_file()]
@@ -111,11 +127,13 @@ def audit_pipeline_tools() -> AuditCheck:
         return AuditCheck("Pipeline tools", "fail", f"Missing: {', '.join(missing)}")
     return AuditCheck("Pipeline tools", "pass", f"All {len(required)} tools present")
 
+
 def audit_config() -> AuditCheck:
     """Check pipeline config is valid."""
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         from pineapple_config import load_config, validate_config
+
         config = load_config()
         warnings = validate_config(config)
         if warnings:
@@ -123,6 +141,7 @@ def audit_config() -> AuditCheck:
         return AuditCheck("Config", "pass", "Config valid")
     except Exception as e:
         return AuditCheck("Config", "fail", f"Config error: {e}")
+
 
 def run_audit(project_path: Path | None = None) -> AuditReport:
     """Run all audit checks."""
@@ -137,6 +156,7 @@ def run_audit(project_path: Path | None = None) -> AuditReport:
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Pineapple Pipeline Audit")
     parser.add_argument("--project", type=Path, help="Project path to audit")
     parser.add_argument("--json", action="store_true", help="JSON output")
@@ -147,8 +167,8 @@ if __name__ == "__main__":
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
     else:
-        print(f"\nPineapple Audit v1.0.0")
-        print(f"========================")
+        print("\nPineapple Audit v1.0.0")
+        print("========================")
         for c in report.checks:
             tag = {"pass": " PASS ", "fail": " FAIL ", "warn": " WARN "}[c.status]
             print(f"  [{tag}] {c.name}: {c.message}")

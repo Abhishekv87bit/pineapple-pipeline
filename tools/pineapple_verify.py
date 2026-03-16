@@ -33,6 +33,7 @@ from typing import Literal
 # Data models
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class LayerResult:
     layer: int
@@ -77,6 +78,7 @@ class VerificationRecord:
 # Helper functions
 # ---------------------------------------------------------------------------
 
+
 def _find_backend(project_path: Path) -> Path | None:
     """Find the backend directory."""
     for candidate in ["backend", "server", "api", "src", "."]:
@@ -102,7 +104,9 @@ def _detect_branch(project_path: Path) -> str:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(project_path),
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return result.stdout.strip() if result.returncode == 0 else "unknown"
     except Exception:
@@ -112,6 +116,7 @@ def _detect_branch(project_path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Signing (CRITICAL SECURITY FEATURE)
 # ---------------------------------------------------------------------------
+
 
 def _compute_evidence_hash(results: list[LayerResult]) -> str:
     """SHA256 hash of all layer outputs -- evidence of real test runs."""
@@ -129,6 +134,7 @@ def _compute_integrity_hash(evidence_hash: str, run_id: str, branch: str, timest
 # Layer runners
 # ---------------------------------------------------------------------------
 
+
 def run_layer_1_unit_tests(project_path: Path) -> LayerResult:
     """Layer 1: Unit tests -- pytest -v"""
     backend = _find_backend(project_path)
@@ -140,14 +146,19 @@ def run_layer_1_unit_tests(project_path: Path) -> LayerResult:
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-v", "--tb=short"],
             cwd=str(backend),
-            capture_output=True, text=True, timeout=300,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         duration = (time.time() - start) * 1000
         test_count = _count_pytest_tests(result.stdout)
         status = "pass" if result.returncode == 0 else "fail"
         return LayerResult(
-            layer=1, name="Unit tests", status=status,
-            test_count=test_count, output=result.stdout + result.stderr,
+            layer=1,
+            name="Unit tests",
+            status=status,
+            test_count=test_count,
+            output=result.stdout + result.stderr,
             duration_ms=duration,
         )
     except subprocess.TimeoutExpired:
@@ -162,7 +173,9 @@ def run_layer_2_integration_tests(project_path: Path) -> LayerResult:
     if not backend:
         return LayerResult(layer=2, name="Integration tests", status="skip")
 
-    test_files = list(backend.glob("tests/test_integration*.py")) + list(backend.glob("tests/test_cache_integration*.py"))
+    test_files = list(backend.glob("tests/test_integration*.py")) + list(
+        backend.glob("tests/test_cache_integration*.py")
+    )
     if not test_files:
         return LayerResult(layer=2, name="Integration tests", status="skip", output="No integration test files found")
 
@@ -171,14 +184,19 @@ def run_layer_2_integration_tests(project_path: Path) -> LayerResult:
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-v", "--tb=short"] + [str(f) for f in test_files],
             cwd=str(backend),
-            capture_output=True, text=True, timeout=300,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         duration = (time.time() - start) * 1000
         test_count = _count_pytest_tests(result.stdout)
         status = "pass" if result.returncode == 0 else "fail"
         return LayerResult(
-            layer=2, name="Integration tests", status=status,
-            test_count=test_count, output=result.stdout + result.stderr,
+            layer=2,
+            name="Integration tests",
+            status=status,
+            test_count=test_count,
+            output=result.stdout + result.stderr,
             duration_ms=duration,
         )
     except subprocess.TimeoutExpired:
@@ -202,14 +220,19 @@ def run_layer_3_security_tests(project_path: Path) -> LayerResult:
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-v", "--tb=short"] + [str(f) for f in test_files],
             cwd=str(backend),
-            capture_output=True, text=True, timeout=300,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         duration = (time.time() - start) * 1000
         test_count = _count_pytest_tests(result.stdout)
         status = "pass" if result.returncode == 0 else "fail"
         return LayerResult(
-            layer=3, name="Security tests", status=status,
-            test_count=test_count, output=result.stdout + result.stderr,
+            layer=3,
+            name="Security tests",
+            status=status,
+            test_count=test_count,
+            output=result.stdout + result.stderr,
             duration_ms=duration,
         )
     except subprocess.TimeoutExpired:
@@ -238,14 +261,19 @@ def run_layer_4_llm_evals(project_path: Path) -> LayerResult:
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-v", "--tb=short"] + [str(f) for f in test_files],
             cwd=str(backend),
-            capture_output=True, text=True, timeout=600,
+            capture_output=True,
+            text=True,
+            timeout=600,
         )
         duration = (time.time() - start) * 1000
         test_count = _count_pytest_tests(result.stdout)
         status = "pass" if result.returncode == 0 else "fail"
         return LayerResult(
-            layer=4, name="LLM evals", status=status,
-            test_count=test_count, output=result.stdout + result.stderr,
+            layer=4,
+            name="LLM evals",
+            status=status,
+            test_count=test_count,
+            output=result.stdout + result.stderr,
             duration_ms=duration,
         )
     except subprocess.TimeoutExpired:
@@ -275,13 +303,18 @@ def run_layer_5_domain_validation(project_path: Path) -> LayerResult:
         result = subprocess.run(
             [sys.executable, str(vlad_path)],
             cwd=str(project_path),
-            capture_output=True, text=True, timeout=300,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         duration = (time.time() - start) * 1000
         status = "pass" if result.returncode == 0 else "fail"
         return LayerResult(
-            layer=5, name="Domain validation", status=status,
-            output=result.stdout + result.stderr, duration_ms=duration,
+            layer=5,
+            name="Domain validation",
+            status=status,
+            output=result.stdout + result.stderr,
+            duration_ms=duration,
         )
     except subprocess.TimeoutExpired:
         return LayerResult(layer=5, name="Domain validation", status="error", output="Timeout after 300s")
@@ -297,6 +330,7 @@ def run_layer_6_visual_inspection(project_path: Path) -> LayerResult:
 # ---------------------------------------------------------------------------
 # Verification orchestrator
 # ---------------------------------------------------------------------------
+
 
 def run_verification(
     project_path: Path,
@@ -363,6 +397,7 @@ def run_verification(
 # Record persistence
 # ---------------------------------------------------------------------------
 
+
 def _write_verification_record(project_path: Path, branch: str, record: VerificationRecord):
     """Write signed verification record to per-branch file."""
     # Sanitize branch name for filename (replace / with --)
@@ -377,9 +412,7 @@ def _write_verification_record(project_path: Path, branch: str, record: Verifica
 def verify_integrity(record_path: Path) -> bool:
     """Verify a verification record's integrity hash."""
     data = json.loads(record_path.read_text(encoding="utf-8"))
-    expected = _compute_integrity_hash(
-        data["evidence_hash"], data["run_id"], data["branch"], data["timestamp"]
-    )
+    expected = _compute_integrity_hash(data["evidence_hash"], data["run_id"], data["branch"], data["timestamp"])
     return expected == data["integrity_hash"]
 
 
@@ -416,8 +449,8 @@ def main():
     if args.json:
         print(json.dumps(record.to_dict(), indent=2))
     else:
-        print(f"\nPineapple Verify v1.0.0")
-        print(f"========================")
+        print("\nPineapple Verify v1.0.0")
+        print("========================")
         print(f"Project: {args.project_path}")
         print(f"Branch:  {record.branch}")
         print(f"Run ID:  {record.run_id or '(none)'}")

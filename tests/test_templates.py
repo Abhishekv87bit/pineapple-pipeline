@@ -160,15 +160,11 @@ class TestRenderedTemplateSyntax:
         try:
             result = yaml.safe_load(rendered)
         except yaml.YAMLError as e:
-            pytest.fail(
-                f"Rendered {template_path.name} has a YAML syntax error:\n{e}"
-            )
+            pytest.fail(f"Rendered {template_path.name} has a YAML syntax error:\n{e}")
 
         # Sanity: should parse to a non-empty dict
         assert result is not None, f"{template_path.name} rendered to empty YAML"
-        assert isinstance(result, dict), (
-            f"{template_path.name} rendered to {type(result).__name__}, expected dict"
-        )
+        assert isinstance(result, dict), f"{template_path.name} rendered to {type(result).__name__}, expected dict"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -193,14 +189,12 @@ class TestKnownIssues:
         rendered = fill_template(raw, config)
 
         # The rendered output should contain the actual limit, not the placeholder
-        assert '{{DEFAULT_LIMIT}}' not in rendered, (
-            "rate_limiter.py still contains {{DEFAULT_LIMIT}} after rendering"
-        )
+        assert "{{DEFAULT_LIMIT}}" not in rendered, "rate_limiter.py still contains {{DEFAULT_LIMIT}} after rendering"
 
         # Specifically check the function signature has the real value
         assert '"60/minute"' in rendered or "'60/minute'" in rendered, (
             "rate_limiter.py function default should be '60/minute' after rendering, "
-            f"but got: {[l for l in rendered.splitlines() if 'default_limit' in l]}"
+            f"but got: {[line for line in rendered.splitlines() if 'default_limit' in line]}"
         )
 
 
@@ -238,9 +232,7 @@ class TestNoUnreplacedPlaceholders:
 
         if failures:
             detail = "\n".join(failures)
-            pytest.fail(
-                f"Templates with unreplaced placeholders after rendering:\n{detail}"
-            )
+            pytest.fail(f"Templates with unreplaced placeholders after rendering:\n{detail}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -264,13 +256,10 @@ class TestDockerfileStructure:
 
         lines = rendered.upper().splitlines()
         # Strip comments for checking
-        instruction_lines = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+        instruction_lines = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
 
         has_from = any(line.startswith("FROM ") for line in instruction_lines)
-        has_cmd = any(
-            line.startswith("CMD ") or line.startswith("ENTRYPOINT ")
-            for line in instruction_lines
-        )
+        has_cmd = any(line.startswith("CMD ") or line.startswith("ENTRYPOINT ") for line in instruction_lines)
 
         assert has_from, f"{template_path.name} is missing FROM instruction"
         assert has_cmd, f"{template_path.name} is missing CMD/ENTRYPOINT instruction"
@@ -286,9 +275,7 @@ class TestDockerfileStructure:
         raw = template_path.read_text(encoding="utf-8")
         rendered = fill_template(raw, config)
 
-        assert "EXPOSE" in rendered.upper(), (
-            f"{template_path.name} is missing EXPOSE instruction"
-        )
+        assert "EXPOSE" in rendered.upper(), f"{template_path.name} is missing EXPOSE instruction"
 
 
 # ═══════════════════════════════════════════════════════════════

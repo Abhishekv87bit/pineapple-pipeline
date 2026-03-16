@@ -11,6 +11,7 @@ Usage:
 
 Exit code: 0 if all steps done/skipped, 1 if any step errored.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,7 +21,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -30,6 +31,7 @@ logger = logging.getLogger("pineapple.evolve")
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class StepResult:
@@ -66,9 +68,8 @@ class EvolveReport:
 # Steps
 # ---------------------------------------------------------------------------
 
-def step_1_session_handoff(
-    project_path: Path, session_file: Path | None = None
-) -> StepResult:
+
+def step_1_session_handoff(project_path: Path, session_file: Path | None = None) -> StepResult:
     """Write session handoff file from git log if not provided."""
     start = time.time()
 
@@ -125,9 +126,7 @@ def step_1_session_handoff(
             (time.time() - start) * 1000,
         )
     except Exception as e:
-        return StepResult(
-            "Session handoff", "error", str(e), (time.time() - start) * 1000
-        )
+        return StepResult("Session handoff", "error", str(e), (time.time() - start) * 1000)
 
 
 def step_2_update_bible(project_path: Path, run_id: str = "") -> StepResult:
@@ -144,9 +143,7 @@ def step_2_update_bible(project_path: Path, run_id: str = "") -> StepResult:
             (time.time() - start) * 1000,
         )
 
-    bible_files = list(projects_dir.glob("*-bible*.yaml")) + list(
-        projects_dir.glob("*-bible*.yml")
-    )
+    bible_files = list(projects_dir.glob("*-bible*.yaml")) + list(projects_dir.glob("*-bible*.yml"))
     if not bible_files:
         return StepResult(
             "Update bible",
@@ -184,9 +181,7 @@ def step_2_update_bible(project_path: Path, run_id: str = "") -> StepResult:
     )
 
 
-def step_3_append_decisions(
-    project_path: Path, decisions: str | None = None
-) -> StepResult:
+def step_3_append_decisions(project_path: Path, decisions: str | None = None) -> StepResult:
     """Append new decisions to decisions.md."""
     start = time.time()
 
@@ -233,14 +228,10 @@ def step_3_append_decisions(
             (time.time() - start) * 1000,
         )
     except Exception as e:
-        return StepResult(
-            "Append decisions", "error", str(e), (time.time() - start) * 1000
-        )
+        return StepResult("Append decisions", "error", str(e), (time.time() - start) * 1000)
 
 
-def step_4_feed_mem0(
-    project_path: Path, session_file: Path | None = None
-) -> StepResult:
+def step_4_feed_mem0(project_path: Path, session_file: Path | None = None) -> StepResult:
     """Feed Mem0 with session facts (if running)."""
     start = time.time()
 
@@ -318,6 +309,7 @@ def step_6_update_eval_baselines(project_path: Path) -> StepResult:
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+
 def run_evolve(
     project_path: Path,
     session_file: Path | None = None,
@@ -342,22 +334,16 @@ def run_evolve(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Pineapple Pipeline Post-Session Automation"
-    )
+    parser = argparse.ArgumentParser(description="Pineapple Pipeline Post-Session Automation")
     parser.add_argument("project_path", type=Path, help="Path to project root")
-    parser.add_argument(
-        "--session-file", type=Path, help="Existing session handoff file"
-    )
+    parser.add_argument("--session-file", type=Path, help="Existing session handoff file")
     parser.add_argument("--decisions", help="Decisions text to append")
     parser.add_argument("--run-id", default="", help="Pipeline run ID")
     parser.add_argument("--json", action="store_true", help="JSON output")
 
     args = parser.parse_args()
 
-    report = run_evolve(
-        args.project_path, args.session_file, args.decisions, args.run_id
-    )
+    report = run_evolve(args.project_path, args.session_file, args.decisions, args.run_id)
 
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
@@ -365,12 +351,8 @@ if __name__ == "__main__":
         print("\nPineapple Evolve v1.0.0")
         print("========================")
         for step in report.steps:
-            status_str = {"done": " DONE ", "skip": " SKIP ", "error": "ERROR "}[
-                step.status
-            ]
+            status_str = {"done": " DONE ", "skip": " SKIP ", "error": "ERROR "}[step.status]
             print(f"  [{status_str}] {step.name}: {step.message}")
-        print(
-            f"\nOverall: {'COMPLETE' if report.all_done else 'PARTIAL (some steps had errors)'}"
-        )
+        print(f"\nOverall: {'COMPLETE' if report.all_done else 'PARTIAL (some steps had errors)'}")
 
     sys.exit(0 if report.all_done else 1)

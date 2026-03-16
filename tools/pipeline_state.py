@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 # Stage enum
 # ---------------------------------------------------------------------------
 
+
 class PipelineStage(str, Enum):
     INTAKE = "INTAKE"
     BRAINSTORM = "BRAINSTORM"
@@ -65,6 +66,7 @@ _TERMINAL_STAGES = {PipelineStage.EVOLVE, PipelineStage.FAILED}
 # Exceptions
 # ---------------------------------------------------------------------------
 
+
 class InvalidTransitionError(Exception):
     """Raised when a stage transition violates the state machine rules."""
 
@@ -80,6 +82,7 @@ class PipelineTimeoutError(Exception):
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+
 
 class PipelineEvent(BaseModel):
     timestamp: str
@@ -105,6 +108,7 @@ class PipelineRun(BaseModel):
 # ---------------------------------------------------------------------------
 # State manager
 # ---------------------------------------------------------------------------
+
 
 class PipelineState:
     """Manages pipeline run state on disk with atomic writes."""
@@ -139,15 +143,11 @@ class PipelineState:
         self._check_timeout(run)
 
         if run.current_stage in _TERMINAL_STAGES:
-            raise InvalidTransitionError(
-                f"Cannot advance from terminal stage {run.current_stage.value}"
-            )
+            raise InvalidTransitionError(f"Cannot advance from terminal stage {run.current_stage.value}")
 
         current_idx = _STAGE_INDEX.get(run.current_stage)
         if current_idx is None or current_idx + 1 >= len(_STAGE_ORDER):
-            raise InvalidTransitionError(
-                f"Cannot advance from {run.current_stage.value}"
-            )
+            raise InvalidTransitionError(f"Cannot advance from {run.current_stage.value}")
 
         next_stage = _STAGE_ORDER[current_idx + 1]
         event = PipelineEvent(
@@ -187,8 +187,7 @@ class PipelineState:
 
         if current_attempts >= max_allowed:
             raise MaxRetriesExceeded(
-                f"BUILD has been retried {current_attempts} times "
-                f"(max {max_allowed}). Run {run_id} cannot retry again."
+                f"BUILD has been retried {current_attempts} times (max {max_allowed}). Run {run_id} cannot retry again."
             )
 
         run.attempt_counts[build_key] = current_attempts + 1
@@ -245,9 +244,7 @@ class PipelineState:
             if not state_file.exists():
                 continue
             try:
-                run = PipelineRun.model_validate_json(
-                    state_file.read_text(encoding="utf-8")
-                )
+                run = PipelineRun.model_validate_json(state_file.read_text(encoding="utf-8"))
                 if run.current_stage not in _TERMINAL_STAGES:
                     active.append(run)
             except Exception:

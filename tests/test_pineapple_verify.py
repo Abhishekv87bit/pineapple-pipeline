@@ -1,14 +1,16 @@
 """Tests for pineapple_verify.py — verification runner."""
-import hashlib
+
 import json
-import pytest
-from unittest.mock import patch, MagicMock
-from pathlib import Path
+from unittest.mock import patch
 from pineapple_verify import (
-    LayerResult, VerificationRecord,
-    run_verification, verify_integrity,
-    _compute_evidence_hash, _compute_integrity_hash,
-    _count_pytest_tests, _find_backend,
+    LayerResult,
+    VerificationRecord,
+    run_verification,
+    verify_integrity,
+    _compute_evidence_hash,
+    _compute_integrity_hash,
+    _count_pytest_tests,
+    _find_backend,
 )
 
 
@@ -86,7 +88,7 @@ class TestRunVerification:
         assert record.integrity_hash != ""
 
     def test_run_verification_writes_record_file(self, tmp_path):
-        record = run_verification(tmp_path, branch="feat/my-feature")
+        run_verification(tmp_path, branch="feat/my-feature")
         record_file = tmp_path / ".pineapple" / "verify" / "feat--my-feature.json"
         assert record_file.is_file()
 
@@ -111,12 +113,12 @@ class TestRunVerification:
 
 class TestVerifyIntegrity:
     def test_valid_record_passes(self, tmp_path):
-        record = run_verification(tmp_path, branch="test")
+        run_verification(tmp_path, branch="test")
         record_file = tmp_path / ".pineapple" / "verify" / "test.json"
         assert verify_integrity(record_file) is True
 
     def test_tampered_record_fails(self, tmp_path):
-        record = run_verification(tmp_path, branch="test")
+        run_verification(tmp_path, branch="test")
         record_file = tmp_path / ".pineapple" / "verify" / "test.json"
         # Tamper with the record
         data = json.loads(record_file.read_text())

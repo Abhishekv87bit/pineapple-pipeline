@@ -8,6 +8,7 @@ to query with jq:
     jq 'select(.event == "stage_transition")' trace.jsonl
     jq 'select(.duration_ms > 1000)' trace.jsonl
 """
+
 from __future__ import annotations
 
 import json
@@ -47,14 +48,16 @@ class PipelineTracer:
         metadata: dict[str, Any] | None = None,
     ):
         """Log a stage transition."""
-        self._append({
-            "event": "stage_transition",
-            "from_stage": from_stage,
-            "to_stage": to_stage,
-            "reason": reason,
-            "duration_ms": round(duration_ms, 1),
-            "metadata": metadata or {},
-        })
+        self._append(
+            {
+                "event": "stage_transition",
+                "from_stage": from_stage,
+                "to_stage": to_stage,
+                "reason": reason,
+                "duration_ms": round(duration_ms, 1),
+                "metadata": metadata or {},
+            }
+        )
 
     def log_agent_dispatch(
         self,
@@ -64,13 +67,15 @@ class PipelineTracer:
         metadata: dict[str, Any] | None = None,
     ):
         """Log an agent dispatch event."""
-        self._append({
-            "event": "agent_dispatch",
-            "stage": stage,
-            "agent_type": agent_type,
-            "task": task,
-            "metadata": metadata or {},
-        })
+        self._append(
+            {
+                "event": "agent_dispatch",
+                "stage": stage,
+                "agent_type": agent_type,
+                "task": task,
+                "metadata": metadata or {},
+            }
+        )
 
     def log_agent_result(
         self,
@@ -82,15 +87,17 @@ class PipelineTracer:
         metadata: dict[str, Any] | None = None,
     ):
         """Log an agent result."""
-        self._append({
-            "event": "agent_result",
-            "stage": stage,
-            "agent_type": agent_type,
-            "success": success,
-            "duration_ms": round(duration_ms, 1),
-            "error": error,
-            "metadata": metadata or {},
-        })
+        self._append(
+            {
+                "event": "agent_result",
+                "stage": stage,
+                "agent_type": agent_type,
+                "success": success,
+                "duration_ms": round(duration_ms, 1),
+                "error": error,
+                "metadata": metadata or {},
+            }
+        )
 
     def log_verification(
         self,
@@ -101,14 +108,16 @@ class PipelineTracer:
         duration_ms: float = 0,
     ):
         """Log a verification run."""
-        self._append({
-            "event": "verification",
-            "layers_passed": layers_passed,
-            "layers_failed": layers_failed,
-            "test_count": test_count,
-            "all_green": all_green,
-            "duration_ms": round(duration_ms, 1),
-        })
+        self._append(
+            {
+                "event": "verification",
+                "layers_passed": layers_passed,
+                "layers_failed": layers_failed,
+                "test_count": test_count,
+                "all_green": all_green,
+                "duration_ms": round(duration_ms, 1),
+            }
+        )
 
     def log_cost(
         self,
@@ -119,14 +128,16 @@ class PipelineTracer:
         call_name: str = "",
     ):
         """Log an LLM cost event."""
-        self._append({
-            "event": "llm_cost",
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cost_usd": round(cost_usd, 6),
-            "call_name": call_name,
-        })
+        self._append(
+            {
+                "event": "llm_cost",
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": round(cost_usd, 6),
+                "call_name": call_name,
+            }
+        )
 
     def log_error(
         self,
@@ -136,13 +147,15 @@ class PipelineTracer:
         metadata: dict[str, Any] | None = None,
     ):
         """Log an error event."""
-        self._append({
-            "event": "error",
-            "stage": stage,
-            "error": error,
-            "recoverable": recoverable,
-            "metadata": metadata or {},
-        })
+        self._append(
+            {
+                "event": "error",
+                "stage": stage,
+                "error": error,
+                "recoverable": recoverable,
+                "metadata": metadata or {},
+            }
+        )
 
     def log_custom(self, event: str, **kwargs):
         """Log any custom event."""

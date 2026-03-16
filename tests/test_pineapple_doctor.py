@@ -1,11 +1,13 @@
 """Tests for pineapple_doctor.py — health check tool."""
-import pytest
+
 from unittest.mock import patch, MagicMock
-from pathlib import Path
 from pineapple_doctor import (
-    CheckResult, DoctorReport, run_doctor,
-    check_docker, check_templates, check_hookify_rules,
-    check_pipeline_tools, check_pydantic,
+    CheckResult,
+    DoctorReport,
+    run_doctor,
+    check_docker,
+    check_templates,
+    check_pydantic,
 )
 
 
@@ -21,31 +23,39 @@ class TestCheckResult:
 
 class TestDoctorReport:
     def test_overall_pass_all_pass(self):
-        report = DoctorReport(checks=[
-            CheckResult("a", "pass", "ok"),
-            CheckResult("b", "pass", "ok"),
-        ])
+        report = DoctorReport(
+            checks=[
+                CheckResult("a", "pass", "ok"),
+                CheckResult("b", "pass", "ok"),
+            ]
+        )
         assert report.overall_pass is True
 
     def test_overall_fail_required_fail(self):
-        report = DoctorReport(checks=[
-            CheckResult("a", "pass", "ok"),
-            CheckResult("b", "fail", "bad", required=True),
-        ])
+        report = DoctorReport(
+            checks=[
+                CheckResult("a", "pass", "ok"),
+                CheckResult("b", "fail", "bad", required=True),
+            ]
+        )
         assert report.overall_pass is False
 
     def test_overall_pass_optional_fail(self):
-        report = DoctorReport(checks=[
-            CheckResult("a", "pass", "ok"),
-            CheckResult("b", "fail", "bad", required=False),
-        ])
+        report = DoctorReport(
+            checks=[
+                CheckResult("a", "pass", "ok"),
+                CheckResult("b", "fail", "bad", required=False),
+            ]
+        )
         assert report.overall_pass is True
 
     def test_skip_does_not_affect_overall(self):
-        report = DoctorReport(checks=[
-            CheckResult("a", "pass", "ok"),
-            CheckResult("b", "skip", "optional", required=False),
-        ])
+        report = DoctorReport(
+            checks=[
+                CheckResult("a", "pass", "ok"),
+                CheckResult("b", "skip", "optional", required=False),
+            ]
+        )
         assert report.overall_pass is True
 
     def test_to_dict(self):
@@ -73,7 +83,7 @@ class TestIndividualChecks:
         templates_dir.mkdir()
         for i in range(12):
             (templates_dir / f"template_{i}.py").write_text("content")
-        with patch("pineapple_doctor.Path") as MockPath:
+        with patch("pineapple_doctor.Path"):
             # Need to mock the TEMPLATE_DIR resolution
             pass
         # Simpler: just test the function exists and returns CheckResult
@@ -88,10 +98,12 @@ class TestIndividualChecks:
 class TestRunDoctor:
     def test_run_doctor_returns_report(self):
         """run_doctor should return a DoctorReport with all checks."""
-        with patch("pineapple_doctor.check_docker") as mock_docker, \
-             patch("pineapple_doctor.check_langfuse") as mock_lf, \
-             patch("pineapple_doctor.check_mem0") as mock_mem0, \
-             patch("pineapple_doctor.check_neo4j") as mock_neo4j:
+        with (
+            patch("pineapple_doctor.check_docker") as mock_docker,
+            patch("pineapple_doctor.check_langfuse") as mock_lf,
+            patch("pineapple_doctor.check_mem0") as mock_mem0,
+            patch("pineapple_doctor.check_neo4j") as mock_neo4j,
+        ):
             mock_docker.return_value = CheckResult("Docker", "pass", "ok")
             mock_lf.return_value = CheckResult("LangFuse", "skip", "optional", required=False)
             mock_mem0.return_value = CheckResult("Mem0", "skip", "optional", required=False)

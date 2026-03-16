@@ -27,10 +27,7 @@ class TestDetectProject:
         """Standard FastAPI layout: backend/app/main.py with app = FastAPI()."""
         main_py = tmp_path / "backend" / "app" / "main.py"
         main_py.parent.mkdir(parents=True)
-        main_py.write_text(
-            "from fastapi import FastAPI\n"
-            "app = FastAPI()\n"
-        )
+        main_py.write_text("from fastapi import FastAPI\napp = FastAPI()\n")
 
         config = detect_project(tmp_path)
 
@@ -252,10 +249,7 @@ class TestApplyPipeline:
         """Create a minimal project structure for testing."""
         backend = tmp_path / "backend" / "app"
         backend.mkdir(parents=True)
-        (backend / "main.py").write_text(
-            "from fastapi import FastAPI\n"
-            "app = FastAPI()\n"
-        )
+        (backend / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
         frontend = tmp_path / "frontend"
         frontend.mkdir()
         (frontend / "package.json").write_text('{"name": "test-frontend"}')

@@ -4,14 +4,10 @@ The module under test does not exist yet; these tests are written from spec.
 All tests use tmp_path fixtures and NOT depend on any real filesystem state.
 """
 
-import pytest
 import yaml
-from pathlib import Path
 
 from pineapple_config import (
     PineappleConfig,
-    ServiceConfig,
-    DefaultsConfig,
     load_config,
     validate_config,
     save_config,
@@ -49,9 +45,7 @@ class TestLoadConfig:
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         global_config = global_dir / "config.yaml"
-        global_config.write_text(yaml.dump({
-            "defaults": {"cost_ceiling_usd": 500.0}
-        }))
+        global_config.write_text(yaml.dump({"defaults": {"cost_ceiling_usd": 500.0}}))
         monkeypatch.setattr(
             "pineapple_config._global_config_path",
             lambda: global_config,
@@ -65,9 +59,7 @@ class TestLoadConfig:
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         global_config = global_dir / "config.yaml"
-        global_config.write_text(yaml.dump({
-            "defaults": {"cost_ceiling_usd": 500.0}
-        }))
+        global_config.write_text(yaml.dump({"defaults": {"cost_ceiling_usd": 500.0}}))
         monkeypatch.setattr(
             "pineapple_config._global_config_path",
             lambda: global_config,
@@ -77,9 +69,7 @@ class TestLoadConfig:
         project_dir.mkdir()
         pineapple_dir = project_dir / ".pineapple"
         pineapple_dir.mkdir()
-        (pineapple_dir / "config.yaml").write_text(yaml.dump({
-            "defaults": {"cost_ceiling_usd": 100.0}
-        }))
+        (pineapple_dir / "config.yaml").write_text(yaml.dump({"defaults": {"cost_ceiling_usd": 100.0}}))
         config = load_config(project_path=project_dir)
         assert config.defaults.cost_ceiling_usd == 100.0
 
@@ -139,12 +129,7 @@ class TestValidateConfig:
         config = PineappleConfig()
         config.defaults.hookify_mode = "warn"
         warnings = validate_config(config)
-        assert any(
-            "warn" in w.lower()
-            or "prototype" in w.lower()
-            or "enforced" in w.lower()
-            for w in warnings
-        )
+        assert any("warn" in w.lower() or "prototype" in w.lower() or "enforced" in w.lower() for w in warnings)
 
 
 class TestSaveConfig:

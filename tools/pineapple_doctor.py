@@ -35,6 +35,7 @@ VERSION = "1.0.0"
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CheckResult:
     name: str
@@ -70,10 +71,12 @@ class DoctorReport:
 # HTTP helper (httpx preferred, stdlib fallback)
 # ---------------------------------------------------------------------------
 
+
 def _http_get(url: str, timeout: float = 5.0) -> int:
     """HTTP GET returning the status code. Raises on connection failure."""
     try:
         import httpx  # type: ignore[import-untyped]
+
         resp = httpx.get(url, timeout=timeout, follow_redirects=True)
         return resp.status_code
     except ImportError:
@@ -81,6 +84,7 @@ def _http_get(url: str, timeout: float = 5.0) -> int:
 
     import urllib.request
     import urllib.error
+
     with urllib.request.urlopen(url, timeout=timeout) as resp:
         return resp.getcode()
 
@@ -88,6 +92,7 @@ def _http_get(url: str, timeout: float = 5.0) -> int:
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
+
 
 def check_docker() -> CheckResult:
     """Verify Docker CLI is available and the daemon is responsive."""
@@ -343,6 +348,7 @@ def check_pydantic() -> CheckResult:
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+
 def run_doctor() -> DoctorReport:
     report = DoctorReport()
     report.checks.append(check_docker())
@@ -362,6 +368,7 @@ def run_doctor() -> DoctorReport:
 # ---------------------------------------------------------------------------
 # Terminal output
 # ---------------------------------------------------------------------------
+
 
 def _use_color() -> bool:
     """Decide whether to emit ANSI color codes."""
@@ -421,6 +428,7 @@ def print_report(report: DoctorReport) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     json_mode = "--json" in sys.argv

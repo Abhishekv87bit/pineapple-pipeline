@@ -6,17 +6,13 @@ All tests use tmp_path fixtures and have no real filesystem dependencies.
 
 import pytest
 import time
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from datetime import datetime
 
 from pipeline_state import (
     PipelineStage,
-    PipelineRun,
-    PipelineEvent,
     PipelineState,
     InvalidTransitionError,
     MaxRetriesExceeded,
-    PipelineTimeoutError,
 )
 
 

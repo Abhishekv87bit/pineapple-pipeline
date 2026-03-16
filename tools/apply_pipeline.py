@@ -166,9 +166,9 @@ def apply_pipeline(
 
     print(f"\nProduction Pipeline — Applying to: {project_path}")
     print(f"  Stack: {stack}")
-    print(f"  Detected: backend={config['BACKEND_DIR']}, "
-          f"frontend={config['FRONTEND_DIR']}, "
-          f"port={config['BACKEND_PORT']}")
+    print(
+        f"  Detected: backend={config['BACKEND_DIR']}, frontend={config['FRONTEND_DIR']}, port={config['BACKEND_PORT']}"
+    )
     print(f"  App module: {config['APP_MODULE']}")
     print()
 
@@ -176,88 +176,140 @@ def apply_pipeline(
 
     # Docker files
     if stack in ("fastapi-vite", "fastapi-only"):
-        results.append(apply_file(
-            "Dockerfile.fastapi",
-            project_path / config["BACKEND_DIR"] / "Dockerfile",
-            config, force, dry_run,
-        ))
+        results.append(
+            apply_file(
+                "Dockerfile.fastapi",
+                project_path / config["BACKEND_DIR"] / "Dockerfile",
+                config,
+                force,
+                dry_run,
+            )
+        )
 
     if stack in ("fastapi-vite", "vite-only"):
-        results.append(apply_file(
-            "Dockerfile.vite",
-            project_path / config["FRONTEND_DIR"] / "Dockerfile",
-            config, force, dry_run,
-        ))
+        results.append(
+            apply_file(
+                "Dockerfile.vite",
+                project_path / config["FRONTEND_DIR"] / "Dockerfile",
+                config,
+                force,
+                dry_run,
+            )
+        )
 
     if stack == "fastapi-vite":
-        results.append(apply_file(
-            "docker-compose.template.yml",
-            project_path / "docker-compose.yml",
-            config, force, dry_run,
-        ))
+        results.append(
+            apply_file(
+                "docker-compose.template.yml",
+                project_path / "docker-compose.yml",
+                config,
+                force,
+                dry_run,
+            )
+        )
 
     # CI/CD
-    results.append(apply_file(
-        "ci.github-actions.yml",
-        project_path / ".github" / "workflows" / "ci.yml",
-        config, force, dry_run,
-    ))
+    results.append(
+        apply_file(
+            "ci.github-actions.yml",
+            project_path / ".github" / "workflows" / "ci.yml",
+            config,
+            force,
+            dry_run,
+        )
+    )
 
     # Environment
-    results.append(apply_file(
-        "env.template",
-        project_path / ".env.example",
-        config, force, dry_run,
-    ))
+    results.append(
+        apply_file(
+            "env.template",
+            project_path / ".env.example",
+            config,
+            force,
+            dry_run,
+        )
+    )
 
     # Python templates (backend only)
     if stack in ("fastapi-vite", "fastapi-only"):
         backend = project_path / config["BACKEND_DIR"]
 
-        results.append(apply_file(
-            "rate_limiter.py",
-            backend / "app" / "middleware" / "rate_limiter.py",
-            config, force, dry_run,
-        ))
-        results.append(apply_file(
-            "input_guardrails.py",
-            backend / "app" / "middleware" / "input_guardrails.py",
-            config, force, dry_run,
-        ))
-        results.append(apply_file(
-            "observability.py",
-            backend / "app" / "middleware" / "observability.py",
-            config, force, dry_run,
-        ))
-        results.append(apply_file(
-            "resilience.py",
-            backend / "app" / "middleware" / "resilience.py",
-            config, force, dry_run,
-        ))
+        results.append(
+            apply_file(
+                "rate_limiter.py",
+                backend / "app" / "middleware" / "rate_limiter.py",
+                config,
+                force,
+                dry_run,
+            )
+        )
+        results.append(
+            apply_file(
+                "input_guardrails.py",
+                backend / "app" / "middleware" / "input_guardrails.py",
+                config,
+                force,
+                dry_run,
+            )
+        )
+        results.append(
+            apply_file(
+                "observability.py",
+                backend / "app" / "middleware" / "observability.py",
+                config,
+                force,
+                dry_run,
+            )
+        )
+        results.append(
+            apply_file(
+                "resilience.py",
+                backend / "app" / "middleware" / "resilience.py",
+                config,
+                force,
+                dry_run,
+            )
+        )
 
         # Cache + MCP (Phase 4 templates)
-        results.append(apply_file(
-            "cache.py",
-            backend / "app" / "middleware" / "cache.py",
-            config, force, dry_run,
-        ))
-        results.append(apply_file(
-            "mcp_server.py",
-            backend / "mcp_server.py",
-            config, force, dry_run,
-        ))
+        results.append(
+            apply_file(
+                "cache.py",
+                backend / "app" / "middleware" / "cache.py",
+                config,
+                force,
+                dry_run,
+            )
+        )
+        results.append(
+            apply_file(
+                "mcp_server.py",
+                backend / "mcp_server.py",
+                config,
+                force,
+                dry_run,
+            )
+        )
 
         # Test templates
-        results.append(apply_file(
-            "test_adversarial.py",
-            backend / "tests" / "test_adversarial.py",
-            config, force, dry_run,
-        ))
-        results.append(apply_file(
-            "test_eval_benchmark.py",
-            backend / "tests" / "test_eval_benchmark.py",
-            config, force, dry_run,
-        ))
+        results.append(
+            apply_file(
+                "test_adversarial.py",
+                backend / "tests" / "test_adversarial.py",
+                config,
+                force,
+                dry_run,
+            )
+        )
+        results.append(
+            apply_file(
+                "test_eval_benchmark.py",
+                backend / "tests" / "test_eval_benchmark.py",
+                config,
+                force,
+                dry_run,
+            )
+        )
 
     # Gitignore
     results.append(ensure_gitignore(project_path, dry_run))
@@ -344,15 +396,18 @@ def apply_pipeline(
         print(r)
 
     print(f"\n{'DRY RUN — no files written' if dry_run else 'Done.'}")
-    print(f"Next: review generated files, then run 'docker-compose up --build'")
+    print("Next: review generated files, then run 'docker-compose up --build'")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Apply production pipeline to a project")
     parser.add_argument("project_path", type=Path, help="Path to the project root")
-    parser.add_argument("--stack", default="fastapi-vite",
-                       choices=["fastapi-vite", "fastapi-only", "vite-only"],
-                       help="Project stack type")
+    parser.add_argument(
+        "--stack",
+        default="fastapi-vite",
+        choices=["fastapi-vite", "fastapi-only", "vite-only"],
+        help="Project stack type",
+    )
     parser.add_argument("--force", action="store_true", help="Overwrite existing files")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be created")
 

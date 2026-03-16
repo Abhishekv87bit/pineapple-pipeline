@@ -1,11 +1,12 @@
 """Tests for pineapple_evolve.py — post-session automation."""
-import json
-import pytest
-from pathlib import Path
+
 from unittest.mock import patch
 from pineapple_evolve import (
-    StepResult, EvolveReport, run_evolve,
-    step_1_session_handoff, step_2_update_bible,
+    StepResult,
+    EvolveReport,
+    run_evolve,
+    step_1_session_handoff,
+    step_2_update_bible,
     step_3_append_decisions,
 )
 
@@ -18,17 +19,21 @@ class TestStepResult:
 
 class TestEvolveReport:
     def test_all_done(self):
-        report = EvolveReport(steps=[
-            StepResult("a", "done", "ok"),
-            StepResult("b", "skip", "optional"),
-        ])
+        report = EvolveReport(
+            steps=[
+                StepResult("a", "done", "ok"),
+                StepResult("b", "skip", "optional"),
+            ]
+        )
         assert report.all_done is True
 
     def test_partial_on_error(self):
-        report = EvolveReport(steps=[
-            StepResult("a", "done", "ok"),
-            StepResult("b", "error", "failed"),
-        ])
+        report = EvolveReport(
+            steps=[
+                StepResult("a", "done", "ok"),
+                StepResult("b", "error", "failed"),
+            ]
+        )
         assert report.all_done is False
 
     def test_to_dict(self):
@@ -41,7 +46,9 @@ class TestEvolveReport:
 class TestSessionHandoff:
     @patch("subprocess.run")
     def test_generates_from_git(self, mock_run, tmp_path):
-        mock_run.return_value = type("Result", (), {"stdout": "abc123 Some commit\ndef456 Another commit", "returncode": 0})()
+        mock_run.return_value = type(
+            "Result", (), {"stdout": "abc123 Some commit\ndef456 Another commit", "returncode": 0}
+        )()
         result = step_1_session_handoff(tmp_path)
         assert result.status == "done"
         # Check file was written
