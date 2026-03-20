@@ -25,6 +25,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+# httpx is an optional dep (listed under [doctor] extras)
+try:
+    import httpx as _httpx
+    _HTTPX_AVAILABLE = True
+except ImportError:
+    _HTTPX_AVAILABLE = False
+
+_HTTP_TIMEOUT = 5.0  # seconds for every external call
+
 logger = logging.getLogger("pineapple.evolve")
 
 
@@ -231,78 +240,389 @@ def step_3_append_decisions(project_path: Path, decisions: str | None = None) ->
         return StepResult("Append decisions", "error", str(e), (time.time() - start) * 1000)
 
 
+def _extract_facts_from_session(session_file: Path | None, project_path: Path) -> list[str]:
+    """Read the latest session handoff and pull out bullet-style facts."""
+    target = session_file
+
+    # Fall back to most recently written sessions/<date>.md
+    if target is None or not target.is_file():
+        sessions_dir = project_path / "sessions"
+        if sessions_dir.is_dir():
+            candidates = sorted(sessions_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if candidates:
+                target = candidates[0]
+
+    if target is None or not target.is_file():
+        return []
+
+    facts: list[str] = []
+    text = target.read_text(encoding="utf-8", errors="replace")
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Treat markdown list items and heading lines as facts
+        if stripped.startswith(("- ", "* ", "+ ")) and len(stripped) > 4:
+            facts.append(stripped[2:].strip())
+        elif stripped.startswith("#") and len(stripped) > 2:
+            facts.append(stripped.lstrip("#").strip())
+    return facts
+
+
 def step_4_feed_mem0(project_path: Path, session_file: Path | None = None) -> StepResult:
     """Feed Mem0 with session facts (if running)."""
     start = time.time()
 
-    try:
-        import urllib.request
-
-        req = urllib.request.Request("http://localhost:8080/health", method="GET")
-        urllib.request.urlopen(req, timeout=3)
-    except Exception:
+    if not _HTTPX_AVAILABLE:
         return StepResult(
             "Feed Mem0",
             "skip",
-            "Mem0 not running",
+            "httpx not installed -- skipping Mem0 feed",
             (time.time() - start) * 1000,
         )
 
-    # Mem0 is running -- but actual feeding requires the session content
-    # and Mem0 API
+    try:
+        from pineapple_config import load_config
+        cfg = load_config(project_path)
+        mem0_url = cfg.services.mem0_url.rstrip("/")
+    except Exception:
+        mem0_url = "http://localhost:8080"
+
+    # Reachability check
+    try:
+        resp = _httpx.get(f"{mem0_url}/health", timeout=_HTTP_TIMEOUT)
+        resp.raise_for_status()
+    except _httpx.ConnectError:
+        return StepResult(
+            "Feed Mem0",
+            "skip",
+            f"Mem0 not reachable at {mem0_url}",
+            (time.time() - start) * 1000,
+        )
+    except _httpx.TimeoutException:
+        return StepResult(
+            "Feed Mem0",
+            "skip",
+            f"Mem0 health check timed out ({_HTTP_TIMEOUT}s)",
+            (time.time() - start) * 1000,
+        )
+    except Exception as exc:
+        return StepResult(
+            "Feed Mem0",
+            "skip",
+            f"Mem0 health check failed: {exc}",
+            (time.time() - start) * 1000,
+        )
+
+    facts = _extract_facts_from_session(session_file, project_path)
+    if not facts:
+        return StepResult(
+            "Feed Mem0",
+            "skip",
+            "No facts to send (empty session file)",
+            (time.time() - start) * 1000,
+        )
+
+    stored = 0
+    errors: list[str] = []
+    for fact in facts:
+        payload = {
+            "messages": [{"role": "user", "content": fact}],
+            "user_id": "pineapple",
+        }
+        try:
+            r = _httpx.post(
+                f"{mem0_url}/v1/memories/",
+                json=payload,
+                timeout=_HTTP_TIMEOUT,
+            )
+            r.raise_for_status()
+            stored += 1
+            logger.debug("Mem0: stored fact %r", fact[:60])
+        except _httpx.ConnectError as exc:
+            errors.append(f"connect error: {exc}")
+            break  # server went away mid-loop
+        except _httpx.TimeoutException:
+            errors.append(f"timeout storing fact: {fact[:40]!r}")
+        except Exception as exc:
+            errors.append(f"error storing {fact[:40]!r}: {exc}")
+
+    if errors:
+        logger.warning("Feed Mem0: %d errors -- %s", len(errors), errors[0])
+
+    msg = f"Stored {stored}/{len(facts)} facts to {mem0_url}"
+    if errors:
+        msg += f" ({len(errors)} errors: {errors[0]})"
+    logger.info("Feed Mem0: %s", msg)
     return StepResult(
         "Feed Mem0",
-        "skip",
-        "Mem0 reachable but auto-feed not yet implemented",
+        "done" if stored > 0 or not errors else "error",
+        msg,
         (time.time() - start) * 1000,
     )
+
+
+def _extract_relationships(project_path: Path) -> list[tuple[str, str, str]]:
+    """Scan the latest session + bible diffs for component relationships.
+
+    Returns list of (source, rel_type, target) triples, e.g.
+        ("TripleHelix", "USES", "PlanetaryGear")
+    """
+    relationships: list[tuple[str, str, str]] = []
+
+    # Read most recent session file
+    sessions_dir = project_path / "sessions"
+    lines: list[str] = []
+    if sessions_dir.is_dir():
+        candidates = sorted(sessions_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            lines = candidates[0].read_text(encoding="utf-8", errors="replace").splitlines()
+
+    # Parse simple "A depends on B", "A uses B", "A modified" patterns
+    import re as _re
+    dep_pat = _re.compile(r"\b(\w[\w\s]*?)\s+(?:depends on|uses|requires|inherits from)\s+([\w][\w\s]*)", _re.I)
+    mod_pat = _re.compile(r"\b(modified|created|updated|added):\s*([\w][\w\s\-\.]*)", _re.I)
+
+    project_name = project_path.name or "Project"
+
+    for line in lines:
+        m = dep_pat.search(line)
+        if m:
+            src = m.group(1).strip()[:64]
+            tgt = m.group(2).strip()[:64]
+            rel = "DEPENDS_ON"
+            if "uses" in line.lower():
+                rel = "USES"
+            elif "inherits" in line.lower():
+                rel = "INHERITS_FROM"
+            relationships.append((src, rel, tgt))
+
+        m2 = mod_pat.search(line)
+        if m2:
+            action = m2.group(1).upper()
+            component = m2.group(2).strip()[:64]
+            rel_map = {
+                "MODIFIED": "MODIFIED",
+                "CREATED": "CREATED",
+                "UPDATED": "MODIFIED",
+                "ADDED": "CREATED",
+            }
+            relationships.append((project_name, rel_map.get(action, "MODIFIED"), component))
+
+    return relationships[:50]  # cap at 50 to avoid flooding
+
+
+def _build_neo4j_cypher(relationships: list[tuple[str, str, str]]) -> list[dict]:
+    """Turn relationship triples into Neo4j transactional statements."""
+    statements = []
+    for src, rel, tgt in relationships:
+        # MERGE avoids duplicate nodes/relationships
+        cypher = (
+            f"MERGE (a:Component {{name: $src}}) "
+            f"MERGE (b:Component {{name: $tgt}}) "
+            f"MERGE (a)-[:{rel}]->(b)"
+        )
+        statements.append({"statement": cypher, "parameters": {"src": src, "tgt": tgt}})
+    return statements
 
 
 def step_5_feed_neo4j(project_path: Path) -> StepResult:
     """Update Neo4j component graph (if running)."""
     start = time.time()
 
-    try:
-        import socket
-
-        sock = socket.create_connection(("localhost", 7687), timeout=3)
-        sock.close()
-    except Exception:
+    if not _HTTPX_AVAILABLE:
         return StepResult(
             "Feed Neo4j",
             "skip",
-            "Neo4j not running",
+            "httpx not installed -- skipping Neo4j feed",
             (time.time() - start) * 1000,
         )
 
-    return StepResult(
-        "Feed Neo4j",
-        "skip",
-        "Neo4j reachable but auto-feed not yet implemented",
-        (time.time() - start) * 1000,
-    )
+    try:
+        from pineapple_config import load_config
+        cfg = load_config(project_path)
+        # neo4j_url may be bolt:// -- swap to http for the HTTP API
+        raw_url = cfg.services.neo4j_url
+        if raw_url.startswith("bolt://"):
+            http_url = raw_url.replace("bolt://", "http://", 1)
+            # Default Neo4j HTTP port is 7474; bolt is 7687 -- adjust
+            http_url = http_url.replace(":7687", ":7474")
+        else:
+            http_url = raw_url
+        http_url = http_url.rstrip("/")
+    except Exception:
+        http_url = "http://localhost:7474"
+
+    tx_url = f"{http_url}/db/neo4j/tx/commit"
+
+    # Reachability check
+    try:
+        resp = _httpx.get(http_url, timeout=_HTTP_TIMEOUT)
+        # Neo4j returns 200 on / — any non-connection-error means it's up
+    except _httpx.ConnectError:
+        return StepResult(
+            "Feed Neo4j",
+            "skip",
+            f"Neo4j not reachable at {http_url}",
+            (time.time() - start) * 1000,
+        )
+    except _httpx.TimeoutException:
+        return StepResult(
+            "Feed Neo4j",
+            "skip",
+            f"Neo4j health check timed out ({_HTTP_TIMEOUT}s)",
+            (time.time() - start) * 1000,
+        )
+    except Exception as exc:
+        return StepResult(
+            "Feed Neo4j",
+            "skip",
+            f"Neo4j check failed: {exc}",
+            (time.time() - start) * 1000,
+        )
+
+    relationships = _extract_relationships(project_path)
+    if not relationships:
+        return StepResult(
+            "Feed Neo4j",
+            "skip",
+            "No component relationships found in session",
+            (time.time() - start) * 1000,
+        )
+
+    statements = _build_neo4j_cypher(relationships)
+    payload = {"statements": statements}
+
+    try:
+        r = _httpx.post(
+            tx_url,
+            json=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=_HTTP_TIMEOUT,
+        )
+        r.raise_for_status()
+        resp_data = r.json()
+        neo4j_errors = resp_data.get("errors", [])
+        if neo4j_errors:
+            msg = f"Neo4j returned {len(neo4j_errors)} error(s): {neo4j_errors[0].get('message', '')}"
+            logger.error("Feed Neo4j: %s", msg)
+            return StepResult("Feed Neo4j", "error", msg, (time.time() - start) * 1000)
+
+        msg = f"Sent {len(statements)} relationship(s) to {tx_url}"
+        logger.info("Feed Neo4j: %s", msg)
+        return StepResult("Feed Neo4j", "done", msg, (time.time() - start) * 1000)
+    except _httpx.ConnectError as exc:
+        return StepResult("Feed Neo4j", "skip", f"Neo4j disconnected mid-request: {exc}", (time.time() - start) * 1000)
+    except Exception as exc:
+        return StepResult("Feed Neo4j", "error", f"Neo4j TX failed: {exc}", (time.time() - start) * 1000)
 
 
 def step_6_update_eval_baselines(project_path: Path) -> StepResult:
-    """Update DeepEval baselines from latest verification."""
+    """Update DeepEval baselines from latest verification record.
+
+    Reads the most recent .pineapple/verify/*.json, compares test_count and
+    layers_passed to the stored baseline at .pineapple/baselines.json, and
+    updates the baseline when results improve (or creates it fresh).
+    Does NOT require deepeval to be installed.
+    """
     start = time.time()
 
-    try:
-        import deepeval  # noqa: F401
-    except ImportError:
+    verify_dir = project_path / ".pineapple" / "verify"
+    baselines_path = project_path / ".pineapple" / "baselines.json"
+
+    if not verify_dir.is_dir():
         return StepResult(
             "Update baselines",
             "skip",
-            "deepeval not installed",
+            "No .pineapple/verify/ directory",
             (time.time() - start) * 1000,
         )
 
-    return StepResult(
-        "Update baselines",
-        "skip",
-        "DeepEval installed but baseline update not yet implemented",
-        (time.time() - start) * 1000,
-    )
+    records = sorted(verify_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not records:
+        return StepResult(
+            "Update baselines",
+            "skip",
+            "No verification records in .pineapple/verify/",
+            (time.time() - start) * 1000,
+        )
+
+    # Load latest verification record
+    try:
+        latest = json.loads(records[0].read_text(encoding="utf-8"))
+    except Exception as exc:
+        return StepResult(
+            "Update baselines",
+            "error",
+            f"Failed to read verify record {records[0].name}: {exc}",
+            (time.time() - start) * 1000,
+        )
+
+    current_test_count: int = int(latest.get("test_count", 0))
+    current_layers: list[int] = list(latest.get("layers_passed", []))
+    current_layer_count = len(current_layers)
+
+    # Load existing baseline (if any)
+    baseline: dict = {}
+    if baselines_path.is_file():
+        try:
+            baseline = json.loads(baselines_path.read_text(encoding="utf-8"))
+        except Exception:
+            baseline = {}
+
+    prev_test_count: int = int(baseline.get("test_count", 0))
+    prev_layer_count: int = int(baseline.get("layers_passed_count", 0))
+
+    # Decide whether to update
+    improved = current_test_count > prev_test_count or current_layer_count > prev_layer_count
+    regressed = current_test_count < prev_test_count or current_layer_count < prev_layer_count
+    unchanged = not improved and not regressed
+
+    if regressed:
+        msg = (
+            f"REGRESSION: test_count {prev_test_count} -> {current_test_count}, "
+            f"layers {prev_layer_count} -> {current_layer_count}. Baseline NOT updated."
+        )
+        logger.warning("Update baselines: %s", msg)
+        return StepResult("Update baselines", "error", msg, (time.time() - start) * 1000)
+
+    if unchanged and baseline:
+        msg = (
+            f"No change: test_count={current_test_count}, layers_passed={current_layer_count}. "
+            "Baseline unchanged."
+        )
+        logger.info("Update baselines: %s", msg)
+        return StepResult("Update baselines", "skip", msg, (time.time() - start) * 1000)
+
+    # Write updated baseline
+    new_baseline = {
+        "updated_at": datetime.now().isoformat(),
+        "source_record": records[0].name,
+        "test_count": current_test_count,
+        "layers_passed_count": current_layer_count,
+        "layers_passed": current_layers,
+    }
+    try:
+        baselines_path.parent.mkdir(parents=True, exist_ok=True)
+        baselines_path.write_text(json.dumps(new_baseline, indent=2), encoding="utf-8")
+    except Exception as exc:
+        return StepResult(
+            "Update baselines",
+            "error",
+            f"Failed to write baselines.json: {exc}",
+            (time.time() - start) * 1000,
+        )
+
+    if not baseline:
+        msg = (
+            f"Baseline created: test_count={current_test_count}, "
+            f"layers_passed={current_layer_count}."
+        )
+    else:
+        msg = (
+            f"Improved: test_count {prev_test_count} -> {current_test_count}, "
+            f"layers {prev_layer_count} -> {current_layer_count}. Baseline updated."
+        )
+    logger.info("Update baselines: %s", msg)
+    return StepResult("Update baselines", "done", msg, (time.time() - start) * 1000)
 
 
 # ---------------------------------------------------------------------------

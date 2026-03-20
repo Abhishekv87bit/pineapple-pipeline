@@ -315,3 +315,93 @@ class TestAppendOnly:
         for entry in tracer.get_trace():
             assert entry["run_id"] == "run-001"
             assert len(entry["timestamp"]) > 10  # ISO format
+
+
+# ---------------------------------------------------------------------------
+# check_cost_ceiling
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCostCeiling:
+    def test_no_costs_returns_continue(self, tmp_path):
+        """With no costs logged, result should be continue with total_cost=0."""
+        tracer = PipelineTracer(tmp_path, "run-001")
+        result = tracer.check_cost_ceiling(ceiling_usd=200.0)
+
+        assert result["exceeded"] is False
+        assert result["total_cost"] == 0.0
+        assert result["ceiling"] == 200.0
+        assert result["remaining"] == 200.0
+        assert result["recommendation"] == "continue"
+
+    def test_costs_under_80_percent_returns_continue(self, tmp_path):
+        """Costs below 80% of ceiling should return 'continue'."""
+        tracer = PipelineTracer(tmp_path, "run-001")
+        # Log $100 against a $200 ceiling — 50%, under the 80% threshold
+        tracer.log_cost("claude", 1000, 500, 100.0)
+        result = tracer.check_cost_ceiling(ceiling_usd=200.0)
+
+        assert result["exceeded"] is False
+        assert result["total_cost"] == 100.0
+        assert result["remaining"] == 100.0
+        assert result["recommendation"] == "continue"
+
+    def test_costs_just_above_80_percent_returns_warning(self, tmp_path):
+        """Costs just above 80% of ceiling should return 'warning'.
+
+        The boundary is strict (cost > ceiling * 0.8), so exactly 80% still
+        returns 'continue'.  This test uses $161 (80.5%) to exercise the
+        warning band.
+        """
+        tracer = PipelineTracer(tmp_path, "run-001")
+        # Log $161 against a $200 ceiling — 80.5%, strictly above the threshold
+        tracer.log_cost("claude", 1000, 500, 161.0)
+        result = tracer.check_cost_ceiling(ceiling_usd=200.0)
+
+        assert result["exceeded"] is False
+        assert result["recommendation"] == "warning"
+
+    def test_costs_above_80_percent_returns_warning(self, tmp_path):
+        """Costs between 80% and 100% of ceiling should return 'warning'."""
+        tracer = PipelineTracer(tmp_path, "run-001")
+        # Log $190 against a $200 ceiling — 95%
+        tracer.log_cost("claude", 1000, 500, 190.0)
+        result = tracer.check_cost_ceiling(ceiling_usd=200.0)
+
+        assert result["exceeded"] is False
+        assert result["total_cost"] == 190.0
+        assert result["recommendation"] == "warning"
+
+    def test_costs_over_ceiling_returns_exceeded(self, tmp_path):
+        """Costs exceeding the ceiling should set exceeded=True and return 'exceeded'."""
+        tracer = PipelineTracer(tmp_path, "run-001")
+        # Log $250 against a $200 ceiling
+        tracer.log_cost("claude", 1000, 500, 250.0)
+        result = tracer.check_cost_ceiling(ceiling_usd=200.0)
+
+        assert result["exceeded"] is True
+        assert result["total_cost"] == 250.0
+        assert result["remaining"] == -50.0
+        assert result["recommendation"] == "exceeded"
+
+    def test_ceiling_and_remaining_fields_present(self, tmp_path):
+        """Result dict must always include all five keys."""
+        tracer = PipelineTracer(tmp_path, "run-001")
+        result = tracer.check_cost_ceiling()
+
+        assert set(result.keys()) == {"exceeded", "total_cost", "ceiling", "remaining", "recommendation"}
+
+    def test_custom_ceiling_value(self, tmp_path):
+        """ceiling_usd parameter should be honoured."""
+        tracer = PipelineTracer(tmp_path, "run-001")
+        tracer.log_cost("claude", 100, 50, 5.0)
+        # $5 against a $10 ceiling — 50%, should continue
+        result = tracer.check_cost_ceiling(ceiling_usd=10.0)
+        assert result["recommendation"] == "continue"
+        assert result["ceiling"] == 10.0
+
+        # $5 against a $5 ceiling — exactly at limit; 5 > 5 is False so not exceeded,
+        # but 5 > 5*0.8=4 is True, so warning
+        result2 = tracer.check_cost_ceiling(ceiling_usd=5.0)
+        assert result2["recommendation"] == "warning"
+        assert result2["exceeded"] is False

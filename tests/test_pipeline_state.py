@@ -15,7 +15,9 @@ from pipeline_state import (
     InvalidTransitionError,
     MaxRetriesExceeded,
     PipelineTimeoutError,
+    check_run_cost,
 )
+from pipeline_tracer import PipelineTracer
 
 
 class TestCreateRun:
@@ -320,3 +322,88 @@ class TestPipelineTimeoutError:
         # Default timeout is 4 hours, run was just created, should be fine
         run = state.advance(run.run_id)
         assert run.current_stage == PipelineStage.BRAINSTORM
+
+
+# ---------------------------------------------------------------------------
+# check_run_cost integration
+# ---------------------------------------------------------------------------
+
+
+class TestCheckRunCost:
+    def test_no_costs_returns_continue(self, tmp_path):
+        """With no costs logged, check_run_cost should return continue."""
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+
+        result = check_run_cost(tmp_path, run.run_id, ceiling_usd=200.0)
+
+        assert result["exceeded"] is False
+        assert result["total_cost"] == 0.0
+        assert result["recommendation"] == "continue"
+
+    def test_costs_under_ceiling_returns_continue(self, tmp_path):
+        """Costs well under the ceiling should return continue."""
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+
+        tracer = PipelineTracer(tmp_path, run.run_id)
+        tracer.log_cost("claude", 1000, 500, 50.0)
+
+        result = check_run_cost(tmp_path, run.run_id, ceiling_usd=200.0)
+
+        assert result["exceeded"] is False
+        assert result["total_cost"] == 50.0
+        assert result["recommendation"] == "continue"
+
+    def test_costs_approaching_ceiling_returns_warning(self, tmp_path):
+        """Costs above 80% of ceiling should return warning."""
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+
+        tracer = PipelineTracer(tmp_path, run.run_id)
+        tracer.log_cost("claude", 1000, 500, 170.0)
+
+        result = check_run_cost(tmp_path, run.run_id, ceiling_usd=200.0)
+
+        assert result["exceeded"] is False
+        assert result["recommendation"] == "warning"
+
+    def test_costs_over_ceiling_returns_exceeded(self, tmp_path):
+        """Costs exceeding the ceiling should set exceeded=True."""
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+
+        tracer = PipelineTracer(tmp_path, run.run_id)
+        tracer.log_cost("claude", 1000, 500, 250.0)
+
+        result = check_run_cost(tmp_path, run.run_id, ceiling_usd=200.0)
+
+        assert result["exceeded"] is True
+        assert result["total_cost"] == 250.0
+        assert result["recommendation"] == "exceeded"
+
+    def test_multiple_cost_events_accumulate(self, tmp_path):
+        """Multiple log_cost calls should accumulate into the total."""
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+
+        tracer = PipelineTracer(tmp_path, run.run_id)
+        tracer.log_cost("claude", 500, 200, 80.0, call_name="brainstorm")
+        tracer.log_cost("claude", 500, 200, 80.0, call_name="build")
+        tracer.log_cost("claude", 500, 200, 80.0, call_name="verify")
+
+        result = check_run_cost(tmp_path, run.run_id, ceiling_usd=200.0)
+
+        # $240 total > $200 ceiling
+        assert result["exceeded"] is True
+        assert result["total_cost"] == 240.0
+        assert result["recommendation"] == "exceeded"
+
+    def test_result_contains_all_keys(self, tmp_path):
+        """Result dict from check_run_cost must include all five standard keys."""
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+
+        result = check_run_cost(tmp_path, run.run_id)
+
+        assert set(result.keys()) == {"exceeded", "total_cost", "ceiling", "remaining", "recommendation"}

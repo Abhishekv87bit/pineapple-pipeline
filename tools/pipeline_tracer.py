@@ -211,3 +211,34 @@ class PipelineTracer:
             "first_event": entries[0].get("timestamp", "") if entries else "",
             "last_event": entries[-1].get("timestamp", "") if entries else "",
         }
+
+    def check_cost_ceiling(self, ceiling_usd: float = 200.0) -> dict:
+        """Check if accumulated costs exceed the ceiling.
+
+        Returns dict with:
+            - exceeded: bool
+            - total_cost: float
+            - ceiling: float
+            - remaining: float
+            - recommendation: str (one of: 'continue', 'warning', 'exceeded')
+        """
+        summary = self.get_summary()
+        total_cost = summary.get("total_cost_usd", 0.0)
+
+        exceeded = total_cost > ceiling_usd
+        remaining = ceiling_usd - total_cost
+
+        if total_cost > ceiling_usd:
+            recommendation = "exceeded"
+        elif total_cost > ceiling_usd * 0.8:
+            recommendation = "warning"
+        else:
+            recommendation = "continue"
+
+        return {
+            "exceeded": exceeded,
+            "total_cost": total_cost,
+            "ceiling": ceiling_usd,
+            "remaining": remaining,
+            "recommendation": recommendation,
+        }

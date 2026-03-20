@@ -20,6 +20,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from pipeline_tracer import PipelineTracer
+
 
 # ---------------------------------------------------------------------------
 # Stage enum
@@ -280,3 +282,23 @@ class PipelineState:
     def _state_file(self, run_id: str) -> Path:
         """Return the state.json path for a given run."""
         return self._run_dir(run_id) / "state.json"
+
+
+# ---------------------------------------------------------------------------
+# Standalone cost check (called by the orchestrator before advancing stages)
+# ---------------------------------------------------------------------------
+
+
+def check_run_cost(project_path: Path, run_id: str, ceiling_usd: float = 200.0) -> dict:
+    """Check if a pipeline run's costs exceed the ceiling.
+
+    Loads the tracer for the given run and delegates to
+    PipelineTracer.check_cost_ceiling().  Returns the same dict shape:
+        - exceeded: bool
+        - total_cost: float
+        - ceiling: float
+        - remaining: float
+        - recommendation: str ('continue', 'warning', or 'exceeded')
+    """
+    tracer = PipelineTracer(project_path, run_id)
+    return tracer.check_cost_ceiling(ceiling_usd)
