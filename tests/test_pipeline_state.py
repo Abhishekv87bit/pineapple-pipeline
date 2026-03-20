@@ -11,8 +11,10 @@ from datetime import datetime
 from pipeline_state import (
     PipelineStage,
     PipelineState,
+    PipelineRun,
     InvalidTransitionError,
     MaxRetriesExceeded,
+    PipelineTimeoutError,
 )
 
 
@@ -225,3 +227,96 @@ class TestAtomicWrite:
         run_dir = tmp_path / ".pineapple" / "runs" / run.run_id
         tmp_files = list(run_dir.glob("*.tmp"))
         assert tmp_files == []
+
+
+class TestPipelineTimeoutError:
+    """TST-006: PipelineTimeoutError must be raised when wall-clock timeout is exceeded."""
+
+    def test_advance_raises_on_timeout(self, tmp_path):
+        """Create a run with zero timeout, then advance -- should raise PipelineTimeoutError."""
+        from unittest.mock import patch
+        from datetime import datetime, timezone, timedelta
+
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+
+        # Patch the run's wall_clock_timeout_hours to 0 and created_at to the past
+        # so _check_timeout fires immediately on next advance()
+        run_data = state.get_run(run.run_id)
+        past_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+        # Write a modified state file with timeout=0 and created_at in the past
+        import json
+        state_file = tmp_path / ".pineapple" / "runs" / run.run_id / "state.json"
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        data["wall_clock_timeout_hours"] = 0.0
+        data["created_at"] = past_time
+        state_file.write_text(json.dumps(data), encoding="utf-8")
+
+        with pytest.raises(PipelineTimeoutError) as exc_info:
+            state.advance(run.run_id)
+
+        error_msg = str(exc_info.value)
+        assert run.run_id in error_msg
+        assert "elapsed" in error_msg.lower() or "exceeded" in error_msg.lower()
+
+    def test_retry_raises_on_timeout(self, tmp_path):
+        """Retry should also check wall-clock timeout."""
+        from datetime import datetime, timezone, timedelta
+        import json
+
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+        # Advance to REVIEW (6 steps)
+        for _ in range(6):
+            run = state.advance(run.run_id)
+        assert run.current_stage == PipelineStage.REVIEW
+
+        # Now patch the state file to have expired timeout
+        past_time = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        state_file = tmp_path / ".pineapple" / "runs" / run.run_id / "state.json"
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        data["wall_clock_timeout_hours"] = 0.0
+        data["created_at"] = past_time
+        state_file.write_text(json.dumps(data), encoding="utf-8")
+
+        with pytest.raises(PipelineTimeoutError) as exc_info:
+            state.retry(run.run_id, "retry after timeout")
+
+        error_msg = str(exc_info.value)
+        assert run.run_id in error_msg
+
+    def test_timeout_error_contains_elapsed_time(self, tmp_path):
+        """The PipelineTimeoutError message should include the elapsed time."""
+        from datetime import datetime, timezone, timedelta
+        import json
+
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+
+        # Set created_at to 5 hours ago, timeout to 2 hours
+        past_time = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        state_file = tmp_path / ".pineapple" / "runs" / run.run_id / "state.json"
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        data["wall_clock_timeout_hours"] = 2.0
+        data["created_at"] = past_time
+        state_file.write_text(json.dumps(data), encoding="utf-8")
+
+        with pytest.raises(PipelineTimeoutError) as exc_info:
+            state.advance(run.run_id)
+
+        error_msg = str(exc_info.value)
+        # Should mention run_id
+        assert run.run_id in error_msg
+        # Should mention elapsed time (approximately 5.0h)
+        assert "5." in error_msg or "elapsed" in error_msg.lower()
+        # Should mention the timeout limit
+        assert "2.0" in error_msg or "2h" in error_msg
+
+    def test_no_timeout_when_within_limit(self, tmp_path):
+        """When within timeout limit, advance should work normally."""
+        state = PipelineState(tmp_path)
+        run = state.create_run("feat", "branch")
+        # Default timeout is 4 hours, run was just created, should be fine
+        run = state.advance(run.run_id)
+        assert run.current_stage == PipelineStage.BRAINSTORM
