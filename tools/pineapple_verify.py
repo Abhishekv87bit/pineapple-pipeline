@@ -10,7 +10,7 @@ Usage:
         [--branch NAME] [--layers 1,2,3,4,5,6] [--run-id UUID] [--json]
 
 Exit codes:
-    0 -- all layers passed (or skipped) with at least one pass
+    0 -- all requested layers passed (no skips, no failures)
     1 -- at least one layer failed, or no layers passed
 """
 
@@ -55,6 +55,7 @@ class VerificationRecord:
     layers_skipped: list[int] = field(default_factory=list)
     test_count: int = 0
     all_green: bool = False
+    fully_verified: bool = False
     evidence_hash: str = ""
     integrity_hash: str = ""
 
@@ -69,6 +70,7 @@ class VerificationRecord:
             "layers_skipped": self.layers_skipped,
             "test_count": self.test_count,
             "all_green": self.all_green,
+            "fully_verified": self.fully_verified,
             "evidence_hash": self.evidence_hash,
             "integrity_hash": self.integrity_hash,
         }
@@ -378,8 +380,14 @@ def run_verification(
             record.layers_skipped.append(r.layer)
         record.test_count += r.test_count
 
-    # all_green = no failures AND at least one pass
-    record.all_green = len(record.layers_failed) == 0 and len(record.layers_passed) > 0
+    # all_green = no failures, no skips, and at least one pass
+    record.all_green = (
+        len(record.layers_failed) == 0
+        and len(record.layers_skipped) == 0
+        and len(record.layers_passed) > 0
+    )
+    # fully_verified = same semantics (all layers pass, none skipped or failed)
+    record.fully_verified = record.all_green
 
     # Sign
     record.evidence_hash = _compute_evidence_hash(results)

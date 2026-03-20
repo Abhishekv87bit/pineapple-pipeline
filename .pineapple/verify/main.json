@@ -1,0 +1,22 @@
+{
+  "version": "1.0.0",
+  "run_id": "",
+  "branch": "main",
+  "timestamp": "2026-03-19T21:53:38.613199+00:00",
+  "layers_passed": [
+    1
+  ],
+  "layers_failed": [],
+  "layers_skipped": [
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "test_count": 139,
+  "all_green": false,
+  "fully_verified": false,
+  "evidence_hash": "277bb7ced1ebf29aa298b16169803cfa2b1232829823d86137cb9dca8b644945",
+  "integrity_hash": "43cf52a9025a4079c172d6682115c0bb73afbc05d746253b570b6d0a5663566f"
+}
