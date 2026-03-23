@@ -5,6 +5,7 @@ ISOLATED: Can only run tests, cannot write code.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,6 +150,241 @@ def _check_syntax() -> LayerResult:
     )
 
 
+def _run_security_scan() -> LayerResult:
+    """Layer 4: Security scan via bandit + pattern matching."""
+    findings: list[str] = []
+
+    # Try bandit first
+    bandit_available = False
+    try:
+        result = subprocess.run(
+            ["bandit", "-r", "src", "-f", "json", "-q"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        bandit_available = True
+        if result.returncode != 0 and result.stdout.strip():
+            # bandit returns non-zero when it finds issues
+            import json as _json
+            try:
+                report = _json.loads(result.stdout)
+                for issue in report.get("results", [])[:10]:
+                    sev = issue.get("issue_severity", "?")
+                    msg = issue.get("issue_text", "unknown")
+                    fname = issue.get("filename", "?")
+                    line = issue.get("line_number", "?")
+                    findings.append(f"[{sev}] {fname}:{line} — {msg}")
+            except (ValueError, KeyError):
+                # JSON parse failed; treat raw output as finding
+                findings.append(result.stdout[:200])
+    except FileNotFoundError:
+        pass  # bandit not installed — fall through to pattern scan
+    except subprocess.TimeoutExpired:
+        findings.append("bandit timed out after 60s")
+
+    # Fallback / supplement: regex pattern scan for common issues
+    cwd = Path.cwd()
+    py_files = list(cwd.glob("src/**/*.py"))
+    if not py_files:
+        py_files = list(cwd.glob("**/*.py"))
+        py_files = [f for f in py_files if not any(
+            part in f.parts for part in [".venv", "venv", "node_modules", "__pycache__", ".git"]
+        )]
+
+    dangerous_patterns = [
+        (re.compile(r'\beval\s*\('), "eval() usage"),
+        (re.compile(r'\bexec\s*\('), "exec() usage"),
+        (re.compile(r'(?i)(password|secret|api_key|token)\s*=\s*["\'][^"\']+["\']'), "hardcoded secret"),
+        (re.compile(r'pickle\.loads?\s*\('), "pickle deserialization"),
+        (re.compile(r'subprocess\..*shell\s*=\s*True'), "shell=True in subprocess"),
+    ]
+
+    pattern_hits: list[str] = []
+    for py_file in py_files[:50]:
+        try:
+            text = py_file.read_text(encoding="utf-8", errors="ignore")
+            for lineno, line in enumerate(text.splitlines(), 1):
+                for pat, label in dangerous_patterns:
+                    if pat.search(line):
+                        pattern_hits.append(f"{py_file.name}:{lineno} — {label}")
+        except OSError:
+            pass
+
+    findings.extend(pattern_hits[:20])
+
+    if findings:
+        return LayerResult(
+            layer=4,
+            name="security_scan",
+            status="fail",
+            details="\n".join(findings[:15]),
+            test_count=len(py_files),
+            fail_count=len(findings),
+        )
+
+    source = "bandit + patterns" if bandit_available else "pattern scan only"
+    return LayerResult(
+        layer=4,
+        name="security_scan",
+        status="pass",
+        details=f"No security issues found ({source}, {len(py_files)} files)",
+        test_count=len(py_files),
+    )
+
+
+def _run_code_quality() -> LayerResult:
+    """Layer 5: Code quality via ruff or flake8."""
+    # Try ruff first (faster, modern)
+    for tool_name, cmd in [
+        ("ruff", ["ruff", "check", "src", "--select", "F,E,W", "--no-fix", "--output-format", "text"]),
+        ("flake8", ["flake8", "src", "--select", "F,E,W", "--max-line-length", "120"]),
+    ]:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            output = result.stdout.strip()
+            if result.returncode == 0:
+                return LayerResult(
+                    layer=5,
+                    name="code_quality",
+                    status="pass",
+                    details=f"No issues found ({tool_name})",
+                )
+
+            # Non-zero means issues found
+            lines = output.splitlines()
+            issue_count = len(lines)
+            truncated = "\n".join(lines[:15])
+            if issue_count > 15:
+                truncated += f"\n... and {issue_count - 15} more"
+
+            return LayerResult(
+                layer=5,
+                name="code_quality",
+                status="fail",
+                details=truncated,
+                test_count=issue_count,
+                fail_count=issue_count,
+            )
+        except FileNotFoundError:
+            continue  # Try next tool
+        except subprocess.TimeoutExpired:
+            return LayerResult(
+                layer=5,
+                name="code_quality",
+                status="fail",
+                details=f"{tool_name} timed out after 60s",
+            )
+
+    # Neither tool available
+    return LayerResult(
+        layer=5,
+        name="code_quality",
+        status="skip",
+        details="Neither ruff nor flake8 found in PATH",
+    )
+
+
+def _run_domain_validation() -> LayerResult:
+    """Layer 6: Domain-specific validation for Pineapple Pipeline."""
+    issues: list[str] = []
+    checks_run = 0
+
+    # Check 1: Pydantic models import cleanly
+    checks_run += 1
+    try:
+        result = subprocess.run(
+            ["python", "-c", "from pineapple.models import *; print('OK')"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            issues.append(f"Model import failed: {result.stderr.strip()[:150]}")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        issues.append(f"Model import check error: {exc}")
+
+    # Check 2: All agent modules import cleanly
+    checks_run += 1
+    agent_modules = [
+        "pineapple.agents.intake",
+        "pineapple.agents.strategic_review",
+        "pineapple.agents.architecture",
+        "pineapple.agents.planner",
+        "pineapple.agents.builder",
+        "pineapple.agents.verifier",
+        "pineapple.agents.reviewer",
+        "pineapple.agents.shipper",
+        "pineapple.agents.evolver",
+    ]
+    for mod in agent_modules:
+        try:
+            result = subprocess.run(
+                ["python", "-c", f"import {mod}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                issues.append(f"Import {mod} failed: {result.stderr.strip()[:100]}")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    # Check 3: Anti-pattern detection from dogfood lessons
+    checks_run += 1
+    cwd = Path.cwd()
+    agent_files = list(cwd.glob("src/pineapple/agents/*.py"))
+    anti_patterns = [
+        (re.compile(r'from pineapple\.agents\.builder\b'), "verifier.py", "verifier imports builder (isolation violation)"),
+        (re.compile(r'from pineapple\.agents\.verifier\b'), "builder.py", "builder imports verifier (isolation violation)"),
+        (re.compile(r'from pineapple\.agents\.(builder|verifier)\b'), "reviewer.py", "reviewer imports builder/verifier (isolation violation)"),
+    ]
+    for agent_file in agent_files:
+        try:
+            text = agent_file.read_text(encoding="utf-8", errors="ignore")
+            for pat, target_name, label in anti_patterns:
+                if target_name in agent_file.name and pat.search(text):
+                    issues.append(label)
+        except OSError:
+            pass
+
+    # Check 4: graph.py references all expected nodes
+    checks_run += 1
+    graph_file = cwd / "src" / "pineapple" / "graph.py"
+    if graph_file.exists():
+        try:
+            graph_text = graph_file.read_text(encoding="utf-8", errors="ignore")
+            expected_nodes = ["intake", "strategic_review", "architecture", "plan", "build", "verify", "review", "ship", "evolve"]
+            for node in expected_nodes:
+                if node not in graph_text:
+                    issues.append(f"graph.py missing reference to '{node}' node")
+        except OSError:
+            pass
+
+    if issues:
+        return LayerResult(
+            layer=6,
+            name="domain_validation",
+            status="fail",
+            details="\n".join(issues[:15]),
+            test_count=checks_run,
+            fail_count=len(issues),
+        )
+
+    return LayerResult(
+        layer=6,
+        name="domain_validation",
+        status="pass",
+        details=f"All {checks_run} domain checks passed",
+        test_count=checks_run,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public node
 # ---------------------------------------------------------------------------
@@ -164,32 +400,36 @@ def verifier_node(state: PipelineState) -> dict:
     1. pytest execution
     2. Test file existence check
     3. Python syntax validation
+    4. Security scan (bandit + pattern matching)
+    5. Code quality (ruff / flake8)
+    6. Domain validation (import smoke tests, anti-pattern detection)
     """
     project_name = state.get("project_name", "unknown")
     print(f"[Stage 6: Verify] Project: {project_name}")
 
+    layer_runners = [
+        ("Layer 1: Running pytest...", _run_pytest),
+        ("Layer 2: Checking test files...", _check_test_files_exist),
+        ("Layer 3: Syntax check...", _check_syntax),
+        ("Layer 4: Security scan...", _run_security_scan),
+        ("Layer 5: Code quality...", _run_code_quality),
+        ("Layer 6: Domain validation...", _run_domain_validation),
+    ]
+
     layers: list[LayerResult] = []
+    for label, runner in layer_runners:
+        print(f"  [Verify] {label}")
+        result = runner()
+        layers.append(result)
+        print(f"    Result: {result.status} — {result.details[:80]}")
 
-    # Layer 1: pytest
-    print("  [Verify] Layer 1: Running pytest...")
-    layer1 = _run_pytest()
-    layers.append(layer1)
-    print(f"    Result: {layer1.status} — {layer1.details[:80]}")
-
-    # Layer 2: Test files exist
-    print("  [Verify] Layer 2: Checking test files...")
-    layer2 = _check_test_files_exist()
-    layers.append(layer2)
-    print(f"    Result: {layer2.status} — {layer2.details[:80]}")
-
-    # Layer 3: Syntax check
-    print("  [Verify] Layer 3: Syntax check...")
-    layer3 = _check_syntax()
-    layers.append(layer3)
-    print(f"    Result: {layer3.status} — {layer3.details[:80]}")
-
-    # Determine overall status
+    # Determine overall status: pass/skip = green, fail = red
     all_green = all(lr.status in ("pass", "skip") for lr in layers)
+
+    # Summary counts for logging
+    passed = sum(1 for lr in layers if lr.status == "pass")
+    failed = sum(1 for lr in layers if lr.status == "fail")
+    skipped = sum(1 for lr in layers if lr.status == "skip")
 
     record = VerificationRecord(
         all_green=all_green,
@@ -198,7 +438,8 @@ def verifier_node(state: PipelineState) -> dict:
         timestamp=datetime.now(timezone.utc),
     )
 
-    print(f"  [Verify] Overall: {'ALL GREEN' if all_green else 'ISSUES FOUND'}")
+    verdict = "ALL GREEN" if all_green else "ISSUES FOUND"
+    print(f"  [Verify] Overall: {verdict} ({passed} passed, {failed} failed, {skipped} skipped)")
 
     return {
         "current_stage": "verify",

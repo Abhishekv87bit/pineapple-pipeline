@@ -18,10 +18,52 @@ Environment variables:
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import Any
 
 import instructor
+
+# ---------------------------------------------------------------------------
+# Optional LangFuse integration (graceful degradation if not installed)
+# ---------------------------------------------------------------------------
+
+_HAS_LANGFUSE = False
+try:
+    from langfuse import Langfuse
+    _HAS_LANGFUSE = True
+except ImportError:
+    pass
+
+_logger = logging.getLogger(__name__)
+
+_langfuse_client = None
+
+
+def get_langfuse():
+    """Return a singleton LangFuse client, or None if unavailable.
+
+    Reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_HOST
+    from environment variables automatically.
+    """
+    global _langfuse_client
+    if _langfuse_client is None and _HAS_LANGFUSE:
+        try:
+            _langfuse_client = Langfuse()
+        except Exception as exc:
+            _logger.debug("LangFuse init failed: %s", exc)
+    return _langfuse_client
+
+
+def flush_traces() -> None:
+    """Flush any pending LangFuse traces.  Safe to call even without LangFuse."""
+    lf = get_langfuse()
+    if lf is not None:
+        try:
+            lf.flush()
+        except Exception as exc:
+            _logger.debug("LangFuse flush failed: %s", exc)
 
 # ---------------------------------------------------------------------------
 # Provider constants
@@ -132,6 +174,61 @@ def _make_claude_client() -> instructor.Instructor:
 
 
 # ---------------------------------------------------------------------------
+# Token usage extraction helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_usage(result: Any, provider: str) -> dict[str, int] | None:
+    """Try to pull real token counts from an Instructor/Pydantic response.
+
+    Instructor stores the raw API response on `result._raw_response` for
+    both Anthropic and Gemini.  We try several common attribute paths.
+
+    Returns a dict like {"input": 1200, "output": 340, "total": 1540}
+    or None if we cannot determine usage.
+    """
+    raw = getattr(result, "_raw_response", None)
+
+    # Anthropic: raw.usage.input_tokens / output_tokens
+    if raw is not None:
+        usage_obj = getattr(raw, "usage", None)
+        if usage_obj is not None:
+            inp = getattr(usage_obj, "input_tokens", 0) or 0
+            out = getattr(usage_obj, "output_tokens", 0) or 0
+            if inp or out:
+                return {"input": inp, "output": out, "total": inp + out}
+
+    # Gemini: raw.usage_metadata.prompt_token_count / candidates_token_count
+    if raw is not None:
+        meta = getattr(raw, "usage_metadata", None)
+        if meta is not None:
+            inp = getattr(meta, "prompt_token_count", 0) or 0
+            out = getattr(meta, "candidates_token_count", 0) or 0
+            if inp or out:
+                return {"input": inp, "output": out, "total": inp + out}
+
+    return None
+
+
+def estimate_cost(provider: str, usage: dict[str, int] | None = None) -> float:
+    """Return estimated cost in USD for a single LLM call.
+
+    If *usage* contains real token counts, compute cost from per-token rates.
+    Otherwise fall back to the flat COST_ESTIMATES dict.
+    """
+    if usage is not None:
+        inp = usage.get("input", 0)
+        out = usage.get("output", 0)
+        if provider == PROVIDER_CLAUDE:
+            # Claude Sonnet 4: $3/1M input, $15/1M output
+            return (inp * 3.0 + out * 15.0) / 1_000_000
+        if provider == PROVIDER_GEMINI:
+            # Gemini 2.5 Flash: essentially free tier / negligible
+            return (inp * 0.15 + out * 0.60) / 1_000_000
+    return COST_ESTIMATES.get(provider, 0.02)
+
+
+# ---------------------------------------------------------------------------
 # Unified call wrapper
 # ---------------------------------------------------------------------------
 
@@ -154,10 +251,11 @@ class LLMClient:
         )
     """
 
-    def __init__(self, client: instructor.Instructor, model: str, provider: str):
+    def __init__(self, client: instructor.Instructor, model: str, provider: str, stage: str | None = None):
         self._client = client
         self.model = model
         self.provider = provider
+        self._stage = stage
 
     def create(
         self,
@@ -165,6 +263,7 @@ class LLMClient:
         messages: list[dict[str, str]],
         system: str = "",
         max_tokens: int = 4096,
+        stage: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """Call the underlying LLM and return a Pydantic model instance.
@@ -174,6 +273,7 @@ class LLMClient:
             messages: List of message dicts with "role" and "content" keys.
             system: System prompt (handled identically by both providers via instructor).
             max_tokens: Maximum output tokens. Mapped to the correct param per provider.
+            stage: Optional pipeline stage name for LangFuse trace metadata.
             **kwargs: Additional kwargs passed to the underlying client.
 
         Returns:
@@ -189,15 +289,76 @@ class LLMClient:
         if system:
             call_kwargs["system"] = system
 
-        if self.provider == PROVIDER_CLAUDE:
-            call_kwargs["max_tokens"] = max_tokens
-            # Anthropic instructor uses client.messages.create
-            return self._client.messages.create(**call_kwargs)
-        else:
-            # Gemini: max_tokens is not a direct kwarg; instructor's genai handler
-            # builds a config internally. We skip max_tokens to avoid passing an
-            # unknown kwarg to google.genai.models.generate_content.
-            return self._client.messages.create(**call_kwargs)
+        # ------------------------------------------------------------------
+        # LangFuse: open a generation span (if available)
+        # ------------------------------------------------------------------
+        effective_stage = stage or self._stage
+        lf = get_langfuse()
+        trace = None
+        generation = None
+        if lf is not None:
+            try:
+                trace_name = f"pineapple:{effective_stage}" if effective_stage else "pineapple:call"
+                trace = lf.trace(
+                    name=trace_name,
+                    metadata={
+                        "provider": self.provider,
+                        "model": self.model,
+                        "stage": effective_stage or "unknown",
+                        "response_model": response_model.__name__,
+                    },
+                )
+                # Build a compact input representation for the generation span
+                gen_input = {"system": system, "messages": messages} if system else {"messages": messages}
+                generation = trace.generation(
+                    name=f"llm:{self.model}",
+                    model=self.model,
+                    input=gen_input,
+                    model_parameters={"max_tokens": max_tokens},
+                )
+            except Exception as exc:
+                _logger.debug("LangFuse trace start failed: %s", exc)
+                trace = None
+                generation = None
+
+        # ------------------------------------------------------------------
+        # Actual LLM call
+        # ------------------------------------------------------------------
+        t0 = time.monotonic()
+        error_obj = None
+        result = None
+        try:
+            if self.provider == PROVIDER_CLAUDE:
+                call_kwargs["max_tokens"] = max_tokens
+                result = self._client.messages.create(**call_kwargs)
+            else:
+                result = self._client.messages.create(**call_kwargs)
+            return result
+        except Exception as exc:
+            error_obj = exc
+            raise
+        finally:
+            elapsed = time.monotonic() - t0
+            # Record the generation result in LangFuse
+            if generation is not None:
+                try:
+                    end_kwargs: dict[str, Any] = {
+                        "metadata": {"elapsed_seconds": round(elapsed, 3)},
+                    }
+                    if error_obj is not None:
+                        end_kwargs["status_message"] = str(error_obj)
+                        end_kwargs["level"] = "ERROR"
+                    else:
+                        end_kwargs["output"] = (
+                            result.model_dump() if hasattr(result, "model_dump") else str(result)
+                        )
+                        # Try to extract real token usage from the underlying response
+                        usage = _extract_usage(result, self.provider)
+                        if usage:
+                            end_kwargs["usage"] = usage
+                    generation.end(**end_kwargs)
+                except Exception as exc:
+                    _logger.debug("LangFuse generation end failed: %s", exc)
 
     def __repr__(self) -> str:
         return f"LLMClient(provider={self.provider!r}, model={self.model!r})"
@@ -236,7 +397,7 @@ def get_llm_client(
 
     model_name = model or _DEFAULT_MODELS[provider]
 
-    return LLMClient(client=client, model=model_name, provider=provider)
+    return LLMClient(client=client, model=model_name, provider=provider, stage=stage)
 
 
 def has_any_llm_key() -> bool:
