@@ -19,7 +19,7 @@ _HAS_LLM_DEPS = True
 _IMPORT_ERROR: str | None = None
 
 try:
-    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES
+    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES, estimate_cost, _extract_usage, flush_traces
     from tenacity import retry, stop_after_attempt, wait_exponential
 except ImportError as exc:
     _HAS_LLM_DEPS = False
@@ -123,10 +123,12 @@ def _build_user_prompt(state: PipelineState) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _call_llm(system: str, user: str) -> tuple[DesignSpec, str]:
-    """Call the LLM via the router and return a (DesignSpec, provider) tuple.
+def _call_llm(system: str, user: str) -> tuple[DesignSpec, str, float]:
+    """Call the LLM via the router and return (DesignSpec, provider, cost_usd).
 
     Retries up to 3 times with exponential backoff for transient failures.
+    Uses real token counts from the response when available, otherwise
+    falls back to flat cost estimates.
     """
     llm = get_llm_client(stage="architecture")
 
@@ -139,7 +141,10 @@ def _call_llm(system: str, user: str) -> tuple[DesignSpec, str]:
             max_tokens=_MAX_TOKENS,
         )
 
-    return _inner(), llm.provider
+    result = _inner()
+    usage = _extract_usage(result, llm.provider)
+    cost = estimate_cost(llm.provider, usage)
+    return result, llm.provider, cost
 
 
 # ---------------------------------------------------------------------------
@@ -226,12 +231,12 @@ def architecture_node(state: PipelineState) -> dict:
         user_prompt = _build_user_prompt(state)
 
         print("  [Architecture] Calling LLM for design spec...")
-        spec, provider = _call_llm(_SYSTEM_PROMPT, user_prompt)
+        spec, provider, call_cost = _call_llm(_SYSTEM_PROMPT, user_prompt)
 
         # Force approved=False — human must approve at the interrupt gate
         spec.approved = False
 
-        print(f"  [Architecture] Design spec generated (provider: {provider}):")
+        print(f"  [Architecture] Design spec generated (provider: {provider}, cost: ${call_cost:.4f}):")
         print(f"    Title: {spec.title}")
         print(f"    Components: {len(spec.components)}")
         for comp in spec.components:
@@ -240,10 +245,13 @@ def architecture_node(state: PipelineState) -> dict:
         for category, choice in spec.technology_choices.items():
             print(f"      - {category}: {choice}")
 
+        # Flush LangFuse traces before returning
+        flush_traces()
+
         return {
             "current_stage": "architecture",
             "design_spec": spec.model_dump(),
-            "cost_total_usd": state.get("cost_total_usd", 0.0) + COST_ESTIMATES.get(provider, 0.03),
+            "cost_total_usd": state.get("cost_total_usd", 0.0) + call_cost,
         }
 
     except Exception as e:

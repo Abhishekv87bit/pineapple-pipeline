@@ -19,7 +19,7 @@ _HAS_LLM_DEPS = True
 _IMPORT_ERROR = None  # type: str | None
 
 try:
-    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES
+    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES, estimate_cost, _extract_usage, flush_traces
     from tenacity import retry, stop_after_attempt, wait_exponential
 except ImportError as exc:
     _HAS_LLM_DEPS = False
@@ -131,8 +131,12 @@ def _git_commit(workspace: str, message: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _call_llm_for_task(task: Task, design_summary: str, llm=None) -> BuildResult:
-    """Call the LLM to generate a BuildResult for a single task."""
+def _call_llm_for_task(task: Task, design_summary: str, llm=None) -> tuple[BuildResult, float]:
+    """Call the LLM to generate a BuildResult for a single task.
+
+    Returns (BuildResult, cost_usd). Uses real token counts from the response
+    when available, otherwise falls back to flat cost estimates.
+    """
     if llm is None:
         llm = get_llm_client(stage="build")
 
@@ -152,7 +156,10 @@ def _call_llm_for_task(task: Task, design_summary: str, llm=None) -> BuildResult
             max_tokens=_MAX_TOKENS,
         )
 
-    return _inner()
+    result = _inner()
+    usage = _extract_usage(result, llm.provider)
+    cost = estimate_cost(llm.provider, usage)
+    return result, cost
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +276,6 @@ def builder_node(state: PipelineState) -> dict:
 
     build_results = []  # type: list[dict]
     total_cost = 0.0
-    cost_per_task = COST_ESTIMATES.get(provider, 0.01)
     total_files_written = 0
 
     for task in task_plan.tasks:
@@ -277,11 +283,11 @@ def builder_node(state: PipelineState) -> dict:
 
         if use_llm:
             try:
-                result = _call_llm_for_task(task, design_summary, llm=llm)
+                result, task_cost = _call_llm_for_task(task, design_summary, llm=llm)
                 # Ensure task_id matches
                 result.task_id = task.id
-                total_cost += cost_per_task
-                print(f"    Status: {result.status}, Commits: {len(result.commits)}, Files: {len(result.files_written)}")
+                total_cost += task_cost
+                print(f"    Status: {result.status}, Commits: {len(result.commits)}, Files: {len(result.files_written)}, Cost: ${task_cost:.4f}")
             except Exception as e:
                 print(f"    ERROR: {e}")
                 result = _make_error_result(task.id, str(e))
@@ -313,6 +319,10 @@ def builder_node(state: PipelineState) -> dict:
     failed = sum(1 for r in build_results if r["status"] == "failed")
     print(f"  [Build] Done: {completed} completed, {failed} failed out of {len(build_results)} tasks")
     print(f"  [Build] Total files written to disk: {total_files_written}")
+
+    # Flush LangFuse traces before returning
+    if use_llm:
+        flush_traces()
 
     # Increment build attempt count for observability
     attempt_counts = dict(state.get("attempt_counts", {}))

@@ -1,0 +1,42 @@
+{
+  "phase": "v2c",
+  "title": "Cost tracking fixes",
+  "verified_at": "2026-03-23T00:00:00Z",
+  "verified_by": "claude-opus-4-6",
+  "python": "3.12.8",
+  "hypotheses": {
+    "H-1": {
+      "title": "All 5 agents use real cost tracking",
+      "status": "PASS",
+      "details": {
+        "strategic_review": {"estimate_cost": true, "flush_traces": true, "_extract_usage": true, "old_flat_rate": false},
+        "architecture": {"estimate_cost": true, "flush_traces": true, "_extract_usage": true, "old_flat_rate": false},
+        "planner": {"estimate_cost": true, "flush_traces": true, "_extract_usage": true, "old_flat_rate": false},
+        "builder": {"estimate_cost": true, "flush_traces": true, "_extract_usage": true, "old_flat_rate": false},
+        "reviewer": {"estimate_cost": true, "flush_traces": true, "_extract_usage": true, "old_flat_rate": false}
+      },
+      "gemini_cost_estimate": 0.001,
+      "gemini_cost_nonzero": true
+    },
+    "H-2": {
+      "title": "flush_traces in all agents",
+      "status": "PASS",
+      "details": {
+        "strategic_review": {"flush_traces_calls": 1},
+        "architecture": {"flush_traces_calls": 1},
+        "planner": {"flush_traces_calls": 1},
+        "builder": {"flush_traces_calls": 1},
+        "reviewer": {"flush_traces_calls": 1}
+      }
+    }
+  },
+  "test_suite": {
+    "command": "pytest tests/test_agents.py tests/test_integrations.py",
+    "collected": 98,
+    "passed": 98,
+    "failed": 0,
+    "warnings": 1,
+    "duration_seconds": 114.55
+  },
+  "verdict": "ALL PASS"
+}

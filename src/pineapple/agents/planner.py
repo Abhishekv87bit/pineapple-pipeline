@@ -19,7 +19,7 @@ _HAS_LLM_DEPS = True
 _IMPORT_ERROR: str | None = None
 
 try:
-    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES
+    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES, estimate_cost, _extract_usage, flush_traces
     from tenacity import retry, stop_after_attempt, wait_exponential
 except ImportError as exc:
     _HAS_LLM_DEPS = False
@@ -93,10 +93,12 @@ def _build_user_prompt(state: PipelineState) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _call_llm(system: str, user: str) -> tuple[TaskPlan, str]:
-    """Call the LLM via the router and return a (TaskPlan, provider) tuple.
+def _call_llm(system: str, user: str) -> tuple[TaskPlan, str, float]:
+    """Call the LLM via the router and return (TaskPlan, provider, cost_usd).
 
     Retries up to 3 times with exponential backoff for transient failures.
+    Uses real token counts from the response when available, otherwise
+    falls back to flat cost estimates.
     """
     llm = get_llm_client(stage="plan")
 
@@ -109,7 +111,10 @@ def _call_llm(system: str, user: str) -> tuple[TaskPlan, str]:
             max_tokens=_MAX_TOKENS,
         )
 
-    return _inner(), llm.provider
+    result = _inner()
+    usage = _extract_usage(result, llm.provider)
+    cost = estimate_cost(llm.provider, usage)
+    return result, llm.provider, cost
 
 
 # ---------------------------------------------------------------------------
@@ -179,21 +184,24 @@ def plan_node(state: PipelineState) -> dict:
         user_prompt = _build_user_prompt(state)
 
         print("  [Plan] Calling LLM to generate task plan...")
-        plan, provider = _call_llm(_SYSTEM_PROMPT, user_prompt)
+        plan, provider, call_cost = _call_llm(_SYSTEM_PROMPT, user_prompt)
 
         # Force approved=False — human must approve at the interrupt gate
         plan.approved = False
 
-        print(f"  [Plan] Task plan generated (provider: {provider}):")
+        print(f"  [Plan] Task plan generated (provider: {provider}, cost: ${call_cost:.4f}):")
         print(f"    Tasks: {len(plan.tasks)}")
         for task in plan.tasks:
             print(f"    - {task.id}: {task.description} [{task.complexity}] ${task.estimated_cost_usd:.2f}")
         print(f"    Total estimated cost: ${plan.total_estimated_cost_usd:.2f}")
 
+        # Flush LangFuse traces before returning
+        flush_traces()
+
         return {
             "current_stage": "plan",
             "task_plan": plan.model_dump(),
-            "cost_total_usd": state.get("cost_total_usd", 0.0) + COST_ESTIMATES.get(provider, 0.03),
+            "cost_total_usd": state.get("cost_total_usd", 0.0) + call_cost,
         }
 
     except Exception as e:
