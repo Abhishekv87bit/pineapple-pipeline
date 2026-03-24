@@ -128,6 +128,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
     print(f"[INFO] Request: {args.request}")
     if args.project_name:
         print(f"[INFO] Project: {args.project_name}")
+    if args.target_dir:
+        print(f"[INFO] Target dir: {args.target_dir}")
     print()
 
     # Build the initial state dict
@@ -135,6 +137,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         "run_id": run_id,
         "request": args.request,
         "project_name": args.project_name or "",
+        "target_dir": args.target_dir or "",
         "branch": "",
         "path": path,
         "current_stage": PipelineStage.INTAKE.value,
@@ -288,6 +291,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--project-name",
         default=None,
         help="Project name (default: inferred from request)",
+    )
+    run_parser.add_argument(
+        "--target-dir", "-t",
+        default=None,
+        help="Target project directory to analyze (default: current working directory)",
     )
     run_parser.set_defaults(func=_cmd_run)
 

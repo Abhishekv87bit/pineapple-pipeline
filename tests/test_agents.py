@@ -22,6 +22,7 @@ def _make_state(**overrides) -> dict:
         "run_id": "test-run-001",
         "request": "Build a test widget",
         "project_name": "test-widget",
+        "target_dir": "",
         "branch": "main",
         "path": "full",
         "current_stage": "intake",

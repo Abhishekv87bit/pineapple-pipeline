@@ -16,6 +16,8 @@ class ContextBundle(BaseModel):
     project_type: str
     context_files: list[str] = Field(default_factory=list)
     classification: str
+    codebase_summary: dict = Field(default_factory=dict)
+    project_memory: dict = Field(default_factory=dict)
     loaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

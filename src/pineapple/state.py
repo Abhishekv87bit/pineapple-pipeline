@@ -33,6 +33,7 @@ class PipelineState(TypedDict):
     branch: str
     path: Literal["full", "medium", "lightweight"]
     current_stage: str  # PipelineStage value
+    target_dir: str  # Target project directory to analyze (empty = CWD)
 
     # Stage artifacts (populated by each stage's node)
     context_bundle: dict | None

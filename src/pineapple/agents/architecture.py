@@ -55,7 +55,15 @@ Be specific and practical. Every component must map to real code that a \
 developer can implement. Avoid vague hand-waving.
 
 The architecture must respect the scope defined in the strategic brief's \
-"not_building" list — do not design components for excluded scope."""
+"not_building" list — do not design components for excluded scope.
+
+If context includes a codebase_summary, you MUST respect the existing technology stack.
+Do NOT propose replacing existing technologies unless explicitly asked.
+Propose MODIFICATIONS and ADDITIONS to the existing codebase, not a rewrite.
+
+If locked decisions exist in the context, treat them as hard constraints:
+- Never contradict a locked decision
+- Reference the decision by name in your rationale"""
 
 _USER_PROMPT_TEMPLATE = """\
 ## Strategic Brief
@@ -77,6 +85,12 @@ _USER_PROMPT_TEMPLATE = """\
 Project name: {project_name}
 Project type: {project_type}
 Original request: {request}
+
+## Existing Codebase
+{codebase_summary}
+
+## Locked Decisions
+{locked_decisions}
 
 ## Instructions
 
@@ -105,6 +119,10 @@ def _build_user_prompt(state: PipelineState) -> str:
 
     project_type = context_bundle.get("project_type", "unknown") if context_bundle else "unknown"
 
+    codebase_summary = context_bundle.get("codebase_summary", {}) if context_bundle else {}
+    project_memory = context_bundle.get("project_memory", {}) if context_bundle else {}
+    locked_decisions = project_memory.get("locked_decisions", []) if project_memory else []
+
     return _USER_PROMPT_TEMPLATE.format(
         what=strategic_brief.get("what", "Unknown"),
         why=strategic_brief.get("why", "Unknown"),
@@ -115,6 +133,8 @@ def _build_user_prompt(state: PipelineState) -> str:
         project_name=project_name,
         project_type=project_type,
         request=request,
+        codebase_summary=json.dumps(codebase_summary, indent=2) if codebase_summary else "No existing codebase.",
+        locked_decisions=json.dumps(locked_decisions, indent=2) if locked_decisions else "No locked decisions.",
     )
 
 

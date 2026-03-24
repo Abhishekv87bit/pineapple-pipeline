@@ -50,7 +50,22 @@ then core logic, then integration, then tests, then polish.
 - Keep task count reasonable: 3-15 tasks for most projects.
 - Task IDs should be sequential: T1, T2, T3, etc.
 - Sum all task costs into total_estimated_cost_usd.
-- Set approved to false (human approves at the gate)."""
+- Set approved to false (human approves at the gate).
+
+IMPORTANT: estimated_cost_usd is the LLM API cost for executing this task through the pipeline.
+NOT human development time. NOT infrastructure costs.
+Use these estimates:
+- trivial task (1 LLM call): $0.01
+- standard task (2-3 LLM calls): $0.05
+- complex task (5+ LLM calls): $0.20
+Total project cost should be $0.50-$5.00 for most projects, never hundreds of dollars.
+
+MANDATORY: For every implementation task, generate a corresponding test task.
+Test tasks should:
+- Have files_to_create pointing to tests/ directory
+- Have complexity "trivial" or "standard"
+- Come immediately after the implementation task they test
+Example: if task 1 creates src/manifest.py, task 2 should create tests/test_manifest.py"""
 
 _USER_PROMPT_TEMPLATE = """\
 Design Specification:

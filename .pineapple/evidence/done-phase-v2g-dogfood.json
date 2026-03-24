@@ -1,0 +1,53 @@
+{
+  "phase": "v2g",
+  "title": "5 Dogfood Fixes",
+  "date": "2026-03-24",
+  "gaps": {
+    "GAP-058": {
+      "description": "Codebase scanning with --target-dir",
+      "status": "PASS",
+      "details": "Detected 'python (backend/pyproject.toml)' and 'node (frontend/package.json)' from KFS repo. Fixed str->Path coercion bug. Added subdirectory-level and file-extension-inferred tech stack detection for monorepo layouts.",
+      "files_changed": ["src/pineapple/agents/intake.py"]
+    },
+    "GAP-059": {
+      "description": "Project memory loading",
+      "status": "PASS",
+      "details": "Loaded 1 memory source (MEMORY.md), extracted 1 locked decision and active projects table. Scans CWD, target_dir, and ~/.claude/projects/ subdirectories.",
+      "files_changed": ["src/pineapple/agents/intake.py"]
+    },
+    "GAP-060": {
+      "description": "Architecture respects existing stack",
+      "status": "PASS",
+      "details": "Architecture prompt includes codebase_summary, locked_decisions, and MODIFICATIONS-not-replacements language.",
+      "files_changed": ["src/pineapple/agents/architecture.py"]
+    },
+    "GAP-061": {
+      "description": "Planner LLM cost estimates",
+      "status": "PASS",
+      "details": "Cost calibration ($0.01/$0.05/$0.20 tiers) present in planner prompt. Clarifies these are LLM costs, not human costs.",
+      "files_changed": ["src/pineapple/agents/planner.py"]
+    },
+    "GAP-062": {
+      "description": "Test task generation",
+      "status": "PASS",
+      "details": "Planner prompt includes 'corresponding test' rule and references tests/ directory convention.",
+      "files_changed": ["src/pineapple/agents/planner.py"]
+    }
+  },
+  "test_suite": {
+    "total": 114,
+    "passed": 114,
+    "failed": 0,
+    "warnings": 1,
+    "duration_seconds": 119.36
+  },
+  "bugs_found_and_fixed": [
+    "GAP-058: _scan_codebase(target_dir: Path) crashed with AttributeError when passed a str -- added str->Path coercion",
+    "GAP-058: Tech stack detection missed monorepo layouts (package files in subdirs) -- added one-level-deep fallback and file-extension inference"
+  ],
+  "files_modified": [
+    "src/pineapple/agents/intake.py",
+    "src/pineapple/agents/architecture.py",
+    "src/pineapple/agents/planner.py"
+  ]
+}
