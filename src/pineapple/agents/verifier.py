@@ -415,14 +415,17 @@ def verifier_node(state: PipelineState) -> dict:
     project_name = state.get("project_name", "unknown")
     print(f"[Stage 6: Verify] Project: {project_name}")
 
-    # Resolve workspace path: prefer worktree from setup, fall back to CWD
+    # Resolve workspace path: worktree > target_dir > CWD
     workspace_info = state.get("workspace_info") or {}
-    workspace = workspace_info.get("worktree_path")
+    workspace = (
+        workspace_info.get("worktree_path")
+        or state.get("target_dir")
+    )
 
     if workspace:
         print(f"  [Verify] Workspace: {workspace}")
     else:
-        print("  [Verify] Workspace: using CWD (no worktree)")
+        print("  [Verify] Workspace: using CWD (no worktree or target_dir)")
 
     layer_runners = [
         ("Layer 1: Running pytest...", _run_pytest),

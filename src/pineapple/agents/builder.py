@@ -247,9 +247,13 @@ def builder_node(state: PipelineState) -> dict:
     project_name = state.get("project_name", "unknown")
     print(f"[Stage 5: Build] Project: {project_name}")
 
-    # Resolve workspace path
+    # Resolve workspace path: worktree > target_dir > CWD
     workspace_info = state.get("workspace_info") or {}
-    workspace = workspace_info.get("worktree_path") or os.getcwd()
+    workspace = (
+        workspace_info.get("worktree_path")
+        or state.get("target_dir")
+        or os.getcwd()
+    )
     print(f"  [Build] Workspace: {workspace}")
 
     # Parse task plan from state -- lightweight path may skip planner
