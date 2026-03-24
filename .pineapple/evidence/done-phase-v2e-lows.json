@@ -1,0 +1,55 @@
+{
+  "phase": "v2e",
+  "step": "verify-done",
+  "timestamp": "2026-03-24",
+  "fixes": {
+    "L-1": {
+      "description": "MCP exception logging",
+      "test": "checked mcp_server.py contains warning + exc in except block",
+      "result": "PASS",
+      "rating": "WORKING"
+    },
+    "L-2": {
+      "description": "Deduplicated create()",
+      "test": "counted self._client.messages.create occurrences in llm.py",
+      "result": "PASS (count=1)",
+      "rating": "WORKING"
+    },
+    "L-4": {
+      "description": "Cost ceiling from env var",
+      "test": "PINEAPPLE_COST_CEILING=50 with cost_total_usd=75 -> review_gate returns 'fail'",
+      "result": "PASS",
+      "rating": "WORKING"
+    },
+    "L-5": {
+      "description": "Model names from env vars",
+      "test": "PINEAPPLE_MODEL_GEMINI env var overrides _DEFAULT_MODELS['gemini']",
+      "result": "PASS (gemini-2.0-flash-custom picked up)",
+      "rating": "WORKING"
+    },
+    "L-6": {
+      "description": "integrity_hash computed",
+      "test": "verifier_node returns 64-char SHA256 hash in verify_record.integrity_hash",
+      "result": "PASS (ddcb58255e880dc7..., len=64)",
+      "rating": "WORKING"
+    },
+    "L-7": {
+      "description": "Git check before commit",
+      "test": "builder.py contains 'tools_available' and 'git' checks",
+      "result": "PASS",
+      "rating": "WORKING"
+    },
+    "L-8": {
+      "description": "_append_pydantic.py deleted",
+      "test": "ls confirms file does not exist",
+      "result": "PASS (No such file or directory)",
+      "rating": "WORKING"
+    }
+  },
+  "test_suite": {
+    "command": "pytest tests/test_agents.py tests/test_integrations.py tests/test_cli.py tests/test_mcp.py",
+    "result": "114 passed, 1 warning in 116.47s",
+    "failures": 0
+  },
+  "summary": "7/7 LOW fixes verified WORKING. Full test suite green (114/114)."
+}

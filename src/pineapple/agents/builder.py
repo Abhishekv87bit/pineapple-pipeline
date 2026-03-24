@@ -302,16 +302,20 @@ def builder_node(state: PipelineState) -> dict:
             if written:
                 print(f"    Wrote {len(written)} file(s): {', '.join(written)}")
 
-            # Git commit for this task
-            if result.commits:
-                commit_msg = result.commits[0]
+            # Git commit for this task (only if git is available)
+            tools = workspace_info.get("tools_available", {})
+            if not tools.get("git", True):  # default True for backward compat
+                print("  [Build] Git not available, skipping commits")
             else:
-                commit_msg = f"build({task.id}): {task.description}"
-            committed = _git_commit(workspace, commit_msg)
-            if committed:
-                print(f"    Committed: {commit_msg}")
-            else:
-                print(f"    Git commit skipped (no git or nothing to commit)")
+                if result.commits:
+                    commit_msg = result.commits[0]
+                else:
+                    commit_msg = f"build({task.id}): {task.description}"
+                committed = _git_commit(workspace, commit_msg)
+                if committed:
+                    print(f"    Committed: {commit_msg}")
+                else:
+                    print(f"    Git commit skipped (no git or nothing to commit)")
 
         build_results.append(result.model_dump())
 

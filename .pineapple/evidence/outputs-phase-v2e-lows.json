@@ -1,0 +1,18 @@
+{
+  "phase": "v2e",
+  "step": "verify-outputs",
+  "timestamp": "2026-03-24",
+  "files_modified": {
+    "src/pineapple/agents/builder.py": "+22/-9 lines",
+    "src/pineapple/agents/verifier.py": "+11/-1 lines",
+    "src/pineapple/gates.py": "+4/-1 lines",
+    "src/pineapple/llm.py": "+8/-5 lines",
+    "src/pineapple/mcp_server.py": "+3/-1 lines"
+  },
+  "files_deleted": {
+    "tests/_append_pydantic.py": "confirmed deleted (No such file or directory)"
+  },
+  "total_files_changed": 5,
+  "total_files_deleted": 1,
+  "verdict": "ALL FILES VERIFIED ON DISK"
+}

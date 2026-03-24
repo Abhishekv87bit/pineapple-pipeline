@@ -153,8 +153,9 @@ def pineapple_status() -> str:
             config = {"configurable": {"thread_id": rid}}
             state = pipeline.get_state(config)
             results.append(_state_summary(state))
-    except Exception:
+    except Exception as exc:
         # Fall back to just listing IDs
+        print(f"[WARN] pineapple_status error: {exc}")
         results = [{"run_id": rid} for rid in run_ids]
 
     return json.dumps({"runs": results}, indent=2)

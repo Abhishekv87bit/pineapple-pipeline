@@ -74,8 +74,8 @@ PROVIDER_CLAUDE = "claude"
 
 # Default models per provider
 _DEFAULT_MODELS: dict[str, str] = {
-    PROVIDER_GEMINI: "gemini-2.5-flash",
-    PROVIDER_CLAUDE: "claude-sonnet-4-20250514",
+    PROVIDER_GEMINI: os.environ.get("PINEAPPLE_MODEL_GEMINI", "gemini-2.5-flash"),
+    PROVIDER_CLAUDE: os.environ.get("PINEAPPLE_MODEL_CLAUDE", "claude-sonnet-4-20250514"),
 }
 
 # Rough cost estimates per call (USD) -- used for cost tracking
@@ -330,9 +330,7 @@ class LLMClient:
         try:
             if self.provider == PROVIDER_CLAUDE:
                 call_kwargs["max_tokens"] = max_tokens
-                result = self._client.messages.create(**call_kwargs)
-            else:
-                result = self._client.messages.create(**call_kwargs)
+            result = self._client.messages.create(**call_kwargs)
             return result
         except Exception as exc:
             error_obj = exc

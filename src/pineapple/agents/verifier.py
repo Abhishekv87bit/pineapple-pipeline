@@ -4,6 +4,8 @@ Pure Python — no LLM calls. FRESH CONTEXT: no build knowledge.
 ISOLATED: Can only run tests, cannot write code.
 """
 
+import hashlib
+import json
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -446,10 +448,17 @@ def verifier_node(state: PipelineState) -> dict:
     failed = sum(1 for lr in layers if lr.status == "fail")
     skipped = sum(1 for lr in layers if lr.status == "skip")
 
+    hash_input = json.dumps(
+        [lr.model_dump() if hasattr(lr, "model_dump") else lr for lr in layers],
+        sort_keys=True,
+        default=str,
+    )
+    integrity_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+
     record = VerificationRecord(
         all_green=all_green,
         layers=[lr for lr in layers],
-        integrity_hash="",
+        integrity_hash=integrity_hash,
         timestamp=datetime.now(timezone.utc),
     )
 

@@ -1,0 +1,45 @@
+{
+  "phase": "v2d",
+  "description": "8 medium fixes - retroactive verification",
+  "verified_at": "2026-03-24T00:00:00Z",
+  "verified_by": "claude-opus-4.6",
+  "items": {
+    "M-2": {
+      "title": "Middleware docstring",
+      "rating": "WORKING",
+      "evidence": "pineapple.middleware.__init__ has docstring: 'Middleware: cost tracking, human-in-the-loop, retry logic. Phase 3 placeholder...'"
+    },
+    "M-3": {
+      "title": "MCP server calls flush_traces",
+      "rating": "WORKING",
+      "evidence": "'flush_traces' found in src/pineapple/mcp_server.py. Assertion passed."
+    },
+    "M-4": {
+      "title": "Error plan includes error message",
+      "rating": "WORKING",
+      "evidence": "_make_error_plan('test error xyz') returned plan containing the error string. Verified via import and invocation."
+    },
+    "M-5": {
+      "title": "E2E docs",
+      "rating": "WORKING",
+      "evidence": "docs/E2E_TEST_EVIDENCE.md (200 lines) and docs/E2E_TEST_FULL_EVIDENCE.md (133 lines) both exist with substantive content."
+    },
+    "M-7": {
+      "title": "CLI tests",
+      "rating": "WORKING",
+      "evidence": "tests/test_cli.py: 10 passed in 0.16s. Covers build_parser, run/status/resume subcommands, cmd_run invocation, status with/without DB."
+    },
+    "M-8": {
+      "title": "MCP tests",
+      "rating": "WORKING",
+      "evidence": "tests/test_mcp.py: 6 passed in 4.07s (1 warning). Covers tool registration (run/status/approve/get_state) and flush helper."
+    }
+  },
+  "summary": {
+    "total": 6,
+    "WORKING": 6,
+    "WIRED": 0,
+    "STUBBED": 0,
+    "FAKE": 0
+  }
+}

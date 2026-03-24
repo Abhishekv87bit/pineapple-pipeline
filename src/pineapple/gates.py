@@ -3,6 +3,8 @@
 Gates are pure Python functions that inspect state and return routing decisions.
 No LLM calls. No side effects. Just deterministic logic.
 """
+import os
+
 import pybreaker
 
 from pineapple.state import PipelineState
@@ -84,7 +86,7 @@ def review_gate(state: PipelineState, max_attempts: int = 5) -> str:
         return "fail"
 
     # Cost ceiling (independent of circuit breaker)
-    if state.get("cost_total_usd", 0.0) > 200.0:
+    if state.get("cost_total_usd", 0.0) > float(os.environ.get("PINEAPPLE_COST_CEILING", "200.0")):
         return "fail"
 
     # PyBreaker handles consecutive failures (opens after 3 in a row)
