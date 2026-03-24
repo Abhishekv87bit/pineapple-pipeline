@@ -238,7 +238,12 @@ def setup_node(state: PipelineState) -> dict:
             print(f"  Worktree: {worktree_path}")
             print(f"  Branch: {branch}")
         else:
-            print("  Worktree: skipped (not a git repo or creation failed)")
+            # Worktree failed — fall back to target_dir (not CWD)
+            if effective_dir and str(effective_dir) != str(Path.cwd()):
+                worktree_path = str(effective_dir)
+                print(f"  Worktree: using target dir directly (worktree creation failed)")
+            else:
+                print("  Worktree: skipped (not a git repo or creation failed)")
     else:
         print("  Worktree: skipped (git not available)")
 
