@@ -1,6 +1,9 @@
-"""Dogfood dry-run: Pipeline stages 0-3 on KFS Manifest System.
+"""Dogfood dry-run v2: Pipeline stages 0-3 on KFS Manifest System.
 Runs Intake -> Strategic Review -> Architecture -> Plan.
 Does NOT build code. Observation mode only.
+
+v2 changes: Uses target_dir so intake scans KFS repo, not pipeline repo.
+            Shorter request -- spec content comes from codebase scan.
 """
 import sys, uuid, json
 from pathlib import Path
@@ -13,73 +16,14 @@ from pineapple.agents.strategic_review import strategic_review_node
 from pineapple.agents.architecture import architecture_node
 from pineapple.agents.planner import plan_node
 
-# Load KFS context
-kfs_spec = ""
-spec_path = Path(r"d:\Claude local\docs\superpowers\specs\2026-03-12-kfs-manifest-system-design.md")
-if spec_path.exists():
-    kfs_spec = spec_path.read_text(encoding="utf-8", errors="replace")[:5000]
-    print(f"Loaded KFS manifest spec: {len(kfs_spec)} chars")
-else:
-    print(f"NOTE: Spec file not found at {spec_path}")
-    print("      Using inline KFS Manifest System description instead.\n")
-
-# Also try to load the KFS v2 design doc for richer context
-kfs_arch = ""
-arch_path = Path(r"d:\Claude local\docs\plans\2026-02-23-kinetic-forge-studio-design-v2.md")
-if arch_path.exists():
-    kfs_arch = arch_path.read_text(encoding="utf-8", errors="replace")[:3000]
-    print(f"Loaded KFS v2 architecture doc: {len(kfs_arch)} chars")
-
-# Build the request with inline spec since the file doesn't exist
-spec_description = kfs_spec[:3000] if kfs_spec else """
-## KFS Manifest System (.kfs.yaml)
-
-A unified manifest format that bridges geometry generation and motion simulation
-for Kinetic Forge Studio. Each kinetic sculpture project gets a single .kfs.yaml
-file that describes:
-
-1. **Component Definitions** - Each mechanical component (gears, cams, linkages,
-   shafts, bearings) with parametric dimensions in millimeters, material, and
-   generation method (CadQuery, OpenSCAD, STEP import).
-
-2. **Assembly Graph** - How components connect: parent-child relationships,
-   joint types (revolute, prismatic, fixed), coordinate transforms, and
-   constraint definitions.
-
-3. **Motion Profiles** - Per-joint motion definitions: angular velocity,
-   phase offsets, motion curves (sinusoidal, linear, custom keyframes).
-   Single motor input with transmission ratios through the assembly graph.
-
-4. **Simulation Config** - Timestep, duration, collision detection toggles,
-   gravity, friction coefficients.
-
-5. **Export Targets** - Which formats to produce (STEP, STL, glTF for web
-   preview, animation JSON for the React frontend).
-
-The manifest is the single source of truth. The FastAPI backend reads it,
-generates geometry via CadQuery/OpenSCAD, assembles components, runs motion
-simulation, and serves results to the React frontend.
-
-Tech stack: Python 3.12, FastAPI, React 19, TypeScript, CadQuery, OpenSCAD, SQLite.
-"""
-
-request = f"""Implement the KFS Manifest System as specified in the design doc.
-
-Key requirements from spec:
-{spec_description}
-
-Additional architecture context:
-{kfs_arch[:1500] if kfs_arch else 'Kinetic Forge Studio is a web app (React + FastAPI) for kinetic sculpture design.'}
-
-This is for Kinetic Forge Studio -- a web app (React + FastAPI) for kinetic sculpture design.
-Tech stack: Python 3.12, FastAPI, React 19, TypeScript, CadQuery, OpenSCAD, SQLite.
-"""
+request = "Implement the KFS Manifest System — a unified .kfs.yaml format bridging geometry generation and motion simulation for Kinetic Forge Studio"
 
 run_id = str(uuid.uuid4())
 state = {
     "run_id": run_id,
     "request": request,
     "project_name": "kfs-manifest-system",
+    "target_dir": r"d:\Claude local\kinetic-forge-studio",
     "branch": "main",
     "path": "full",
     "current_stage": "intake",
@@ -113,6 +57,17 @@ state.update(result)
 print(f"    Path: {state.get('path')}")
 print(f"    Project: {state.get('project_name')}")
 print(f"    Context bundle: {'YES' if state.get('context_bundle') else 'NO'}")
+bundle = state.get("context_bundle", {})
+if bundle:
+    cs = bundle.get("codebase_summary", {})
+    print(f"    Tech stack: {cs.get('tech_stack', [])}")
+    print(f"    Directories: {cs.get('directories', [])[:10]}")
+    print(f"    File counts (top 5): {dict(list(cs.get('file_counts', {}).items())[:5])}")
+    pm = bundle.get("project_memory", {})
+    print(f"    Memory sources: {pm.get('memory_sources', [])}")
+    print(f"    Locked decisions: {len(pm.get('locked_decisions', []))} entries")
+    for i, ld in enumerate(pm.get("locked_decisions", [])[:3]):
+        print(f"      Decision {i+1}: {ld[:120]}...")
 
 # Stage 1: Strategic Review
 print("\n>>> STAGE 1: STRATEGIC REVIEW")
@@ -134,6 +89,10 @@ components = spec.get("components", [])
 print(f"    Components: {len(components)}")
 for c in components[:5]:
     print(f"      - {c.get('name', '?')}: {c.get('description', '?')[:80]}")
+tech_choices = spec.get("technology_choices", {})
+print(f"    Technology choices: {len(tech_choices)} entries")
+for k, v in list(tech_choices.items())[:5]:
+    print(f"      {k}: {v}")
 
 # Stage 3: Plan
 print("\n>>> STAGE 3: PLAN")
