@@ -28,10 +28,10 @@ def _run_git(*args: str, cwd: str = None) -> subprocess.CompletedProcess:
     )
 
 
-def _is_git_repo() -> bool:
-    """Check if CWD is inside a git repository."""
+def _is_git_repo(cwd: str = None) -> bool:
+    """Check if a directory is inside a git repository."""
     try:
-        result = _run_git("rev-parse", "--is-inside-work-tree")
+        result = _run_git("rev-parse", "--is-inside-work-tree", cwd=cwd)
         return result.returncode == 0 and result.stdout.strip() == "true"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -64,19 +64,24 @@ def _check_tools() -> dict:
     return tools
 
 
-def _create_run_dir(run_id: str, request: str, path: str) -> str:
+def _create_run_dir(run_id: str, request: str, path: str, base_dir: str = None) -> str:
     """Create .pineapple/runs/<run_id>/ and write run_info.json.
+
+    Args:
+        base_dir: Directory under which to create .pineapple/runs/.
+                  Defaults to CWD if not provided.
 
     Returns the run directory path as a string.
     """
-    run_dir = Path.cwd() / ".pineapple" / "runs" / run_id
+    base = Path(base_dir) if base_dir else Path.cwd()
+    run_dir = base / ".pineapple" / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     run_info = {
         "run_id": run_id,
         "request": request,
         "path": path,
-        "working_directory": str(Path.cwd()),
+        "working_directory": str(base),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     info_file = run_dir / "run_info.json"
@@ -86,14 +91,20 @@ def _create_run_dir(run_id: str, request: str, path: str) -> str:
 
 
 def _setup_worktree(
-    project_name: str, run_id: str
+    project_name: str, run_id: str, repo_dir: str = None
 ) -> tuple:
     """Create a git feature branch and worktree.
+
+    Args:
+        repo_dir: The git repository root to operate on.
+                  Defaults to CWD if not provided.
 
     Returns (worktree_path, branch_name) on success, or (None, None) on
     failure. Never force-pushes or deletes branches.
     """
-    if not _is_git_repo():
+    effective_dir = repo_dir or str(Path.cwd())
+
+    if not _is_git_repo(cwd=effective_dir):
         return None, None
 
     short_id = run_id[:8] if len(run_id) > 8 else run_id
@@ -101,37 +112,37 @@ def _setup_worktree(
 
     # Get the current branch to use as the base
     try:
-        result = _run_git("branch", "--show-current")
+        result = _run_git("branch", "--show-current", cwd=effective_dir)
         base_branch = result.stdout.strip() or "main"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None, None
 
     # Create feature branch (if not exists)
-    result = _run_git("branch", "--list", branch_name)
+    result = _run_git("branch", "--list", branch_name, cwd=effective_dir)
     branch_exists = bool(result.stdout.strip())
 
     if not branch_exists:
-        result = _run_git("branch", branch_name, base_branch)
+        result = _run_git("branch", branch_name, base_branch, cwd=effective_dir)
         if result.returncode != 0:
             print(f"  [WARN] Failed to create branch {branch_name}: "
                   f"{result.stderr.strip()}")
             return None, None
 
-    # Create worktree directory
-    worktree_dir = Path.cwd() / ".pineapple" / "worktrees" / run_id
+    # Create worktree directory under the repo, not CWD
+    worktree_dir = Path(effective_dir) / ".pineapple" / "worktrees" / run_id
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 
     # If worktree already exists, reuse it
     if worktree_dir.exists():
         return str(worktree_dir), branch_name
 
-    result = _run_git("worktree", "add", str(worktree_dir), branch_name)
+    result = _run_git("worktree", "add", str(worktree_dir), branch_name, cwd=effective_dir)
     if result.returncode != 0:
         print(f"  [WARN] Failed to create worktree: {result.stderr.strip()}")
         # Clean up the branch we just created if worktree failed
         # (only if we created it, not if it existed before)
         if not branch_exists:
-            _run_git("branch", "-d", branch_name)
+            _run_git("branch", "-d", branch_name, cwd=effective_dir)
         return None, None
 
     return str(worktree_dir), branch_name
@@ -195,22 +206,34 @@ def setup_node(state: PipelineState) -> dict:
     request = state.get("request", "")
     pipeline_path = state.get("path", "full")
     task_plan = state.get("task_plan")
+    target_dir = state.get("target_dir", "")
 
     print(f"[STAGE 4] Setting up workspace for run {run_id}...")
+
+    # Resolve the effective directory: target_dir if set, else CWD
+    if target_dir and Path(target_dir).is_dir():
+        effective_dir = str(Path(target_dir).resolve())
+        print(f"  Target dir: {effective_dir}")
+    else:
+        effective_dir = None  # signals "use CWD" to helpers
+        if target_dir:
+            print(f"  Target dir: {target_dir} (not found, falling back to CWD)")
+        else:
+            print("  Target dir: not set (using CWD)")
 
     # 1. Check available tools
     tools_available = _check_tools()
     print(f"  Tools: {', '.join(k for k, v in tools_available.items() if v)}")
 
-    # 2. Create run directory with metadata
-    run_dir = _create_run_dir(run_id, request, pipeline_path)
+    # 2. Create run directory with metadata (under target or CWD)
+    run_dir = _create_run_dir(run_id, request, pipeline_path, base_dir=effective_dir)
     print(f"  Run dir: {run_dir}")
 
     # 3. Create git worktree (if in a git repo)
     worktree_path = None
     branch = None
     if tools_available.get("git"):
-        worktree_path, branch = _setup_worktree(project_name, run_id)
+        worktree_path, branch = _setup_worktree(project_name, run_id, repo_dir=effective_dir)
         if worktree_path:
             print(f"  Worktree: {worktree_path}")
             print(f"  Branch: {branch}")

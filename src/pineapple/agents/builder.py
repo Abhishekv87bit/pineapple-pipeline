@@ -58,6 +58,7 @@ Complexity: {complexity}
 Design context:
 {design_summary}
 
+{prior_context}
 Generate a BuildResult for this task.
 - Set status to "completed"
 - Include a commit message in `commits` describing the change
@@ -131,11 +132,15 @@ def _git_commit(workspace: str, message: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _call_llm_for_task(task: Task, design_summary: str, llm=None) -> tuple[BuildResult, float]:
+def _call_llm_for_task(task: Task, design_summary: str, llm=None, prior_context: str = "") -> tuple[BuildResult, float]:
     """Call the LLM to generate a BuildResult for a single task.
 
     Returns (BuildResult, cost_usd). Uses real token counts from the response
     when available, otherwise falls back to flat cost estimates.
+
+    Args:
+        prior_context: Summary of files written by earlier tasks in this run,
+                       so the LLM knows what already exists.
     """
     if llm is None:
         llm = get_llm_client(stage="build")
@@ -152,6 +157,7 @@ def _call_llm_for_task(task: Task, design_summary: str, llm=None) -> tuple[Build
                 files_to_modify=task.files_to_modify or "None",
                 complexity=task.complexity,
                 design_summary=design_summary,
+                prior_context=prior_context,
             )}],
             max_tokens=_MAX_TOKENS,
         )
@@ -277,13 +283,25 @@ def builder_node(state: PipelineState) -> dict:
     build_results = []  # type: list[dict]
     total_cost = 0.0
     total_files_written = 0
+    cumulative_files = []  # type: list[str]  # tracks files written across tasks
 
     for task in task_plan.tasks:
         print(f"  [Build] Task {task.id}: {task.description}")
 
+        # Build prior context string from files written by earlier tasks
+        prior_context = ""
+        if cumulative_files:
+            prior_context = (
+                "Previously completed files in this run (do NOT recreate, "
+                "but you may import from them):\n"
+                + "\n".join(f"  - {f}" for f in cumulative_files)
+            )
+
         if use_llm:
             try:
-                result, task_cost = _call_llm_for_task(task, design_summary, llm=llm)
+                result, task_cost = _call_llm_for_task(
+                    task, design_summary, llm=llm, prior_context=prior_context,
+                )
                 # Ensure task_id matches
                 result.task_id = task.id
                 total_cost += task_cost
@@ -299,6 +317,7 @@ def builder_node(state: PipelineState) -> dict:
         if result.files_written and result.status == "completed":
             written = _write_files_to_disk(result.files_written, workspace)
             total_files_written += len(written)
+            cumulative_files.extend(written)
             if written:
                 print(f"    Wrote {len(written)} file(s): {', '.join(written)}")
 

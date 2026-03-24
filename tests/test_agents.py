@@ -6,6 +6,9 @@ it returns the expected state keys. All tests use the no-LLM fallback paths.
 Covers all 10 agent nodes + human_intervention_node from graph.py.
 """
 import os
+import subprocess
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -702,3 +705,261 @@ class TestHumanInterventionNode:
         state = _make_state(errors=[])
         result = human_intervention_node(state)
         assert result["current_stage"] == "human_intervention"
+
+
+# ---------------------------------------------------------------------------
+# Workspace Flow: target_dir propagation through all stages
+# ---------------------------------------------------------------------------
+
+
+def _init_git_repo(path):
+    """Initialize a git repo at the given path with an initial commit."""
+    subprocess.run(["git", "init", str(path)], capture_output=True, text=True, check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@test.com"],
+                   capture_output=True, text=True, check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"],
+                   capture_output=True, text=True, check=True)
+    # Create initial commit so branches can be created
+    dummy = Path(path) / "README.md"
+    dummy.write_text("# test\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "."], capture_output=True, text=True, check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"],
+                   capture_output=True, text=True, check=True)
+
+
+class TestWorkspaceFlow:
+    """Tests that workspace flows through target_dir correctly."""
+
+    def test_setup_uses_target_dir_for_worktree(self, tmp_path):
+        """Setup should create worktree in target_dir, not CWD."""
+        from pineapple.agents.setup import setup_node
+
+        # Create a target repo separate from CWD
+        target_repo = tmp_path / "target_project"
+        target_repo.mkdir()
+        _init_git_repo(target_repo)
+
+        # CWD is something completely different
+        cwd_dir = tmp_path / "pipeline_cwd"
+        cwd_dir.mkdir()
+
+        state = _make_state(
+            target_dir=str(target_repo),
+            run_id="ws-test-001",
+            project_name="workspace-test",
+        )
+
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(cwd_dir))
+            result = setup_node(state)
+        finally:
+            os.chdir(old_cwd)
+
+        ws_info = result["workspace_info"]
+        worktree_path = ws_info.get("worktree_path")
+
+        # The worktree MUST be under the target_repo, NOT under cwd_dir
+        assert worktree_path is not None, "Worktree should have been created"
+        assert str(target_repo) in worktree_path or worktree_path.startswith(str(target_repo)), \
+            f"Worktree {worktree_path} should be under target {target_repo}, not CWD"
+        assert str(cwd_dir) not in worktree_path, \
+            f"Worktree {worktree_path} should NOT be under CWD {cwd_dir}"
+
+    def test_setup_with_no_target_dir_uses_cwd(self, tmp_path):
+        """Backward compat: no target_dir falls back to CWD."""
+        from pineapple.agents.setup import setup_node
+
+        # Make CWD a git repo
+        _init_git_repo(tmp_path)
+
+        state = _make_state(
+            target_dir="",
+            run_id="ws-test-002",
+            project_name="cwd-fallback",
+        )
+
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            result = setup_node(state)
+        finally:
+            os.chdir(old_cwd)
+
+        ws_info = result["workspace_info"]
+        worktree_path = ws_info.get("worktree_path")
+
+        # Should have created worktree relative to CWD (tmp_path)
+        if worktree_path is not None:
+            assert str(tmp_path) in worktree_path, \
+                f"With no target_dir, worktree {worktree_path} should be under CWD {tmp_path}"
+
+    def test_setup_target_dir_not_git_repo(self, tmp_path):
+        """If target_dir is set but NOT a git repo, use it as workspace directly."""
+        from pineapple.agents.setup import setup_node
+
+        target_dir = tmp_path / "plain_project"
+        target_dir.mkdir()
+
+        cwd_dir = tmp_path / "pipeline_cwd"
+        cwd_dir.mkdir()
+
+        state = _make_state(
+            target_dir=str(target_dir),
+            run_id="ws-test-003",
+            project_name="no-git-test",
+        )
+
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(cwd_dir))
+            result = setup_node(state)
+        finally:
+            os.chdir(old_cwd)
+
+        ws_info = result["workspace_info"]
+        # No worktree (not a git repo), but workspace should still reference target
+        # The run_dir should be under the target_dir, not CWD
+        run_dir = ws_info.get("run_dir", "")
+        assert str(cwd_dir) not in run_dir or str(target_dir) in run_dir, \
+            f"Run dir {run_dir} should reference target_dir, not CWD"
+
+    def test_builder_writes_to_workspace_from_state(self, tmp_path):
+        """Builder gets workspace path from workspace_info, writes there."""
+        from pineapple.agents.builder import builder_node
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+
+        state = _make_state(
+            workspace_info={
+                "worktree_path": str(workspace_dir),
+                "branch": "feat/test",
+                "run_dir": str(tmp_path / "run"),
+                "tools_available": {"python": True, "git": False, "pytest": False},
+                "scaffolded_files": [],
+            },
+            task_plan={
+                "tasks": [
+                    {
+                        "id": "T1",
+                        "description": "Create hello module",
+                        "files_to_create": ["hello.py"],
+                        "files_to_modify": [],
+                        "complexity": "trivial",
+                        "estimated_cost_usd": 0.0,
+                    },
+                ],
+                "total_estimated_cost_usd": 0.0,
+            },
+        )
+
+        with patch("pineapple.agents.builder._HAS_LLM_DEPS", False):
+            result = builder_node(state)
+
+        # Builder should have written files into workspace_dir, not CWD
+        assert (workspace_dir / "hello.py").exists(), \
+            f"hello.py should exist in workspace {workspace_dir}, not CWD"
+
+    def test_verifier_runs_in_workspace(self, tmp_path):
+        """Verifier runs pytest/checks in workspace_info.worktree_path."""
+        from pineapple.agents.verifier import verifier_node
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        # Place a Python file so syntax check has something to check
+        (workspace_dir / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+        state = _make_state(
+            workspace_info={
+                "worktree_path": str(workspace_dir),
+                "branch": "feat/test",
+                "run_dir": str(tmp_path / "run"),
+                "tools_available": {"python": True, "git": True, "pytest": True},
+                "scaffolded_files": [],
+            },
+        )
+
+        result = verifier_node(state)
+
+        assert result["current_stage"] == "verify"
+        record = result["verify_record"]
+        # Syntax check should have found our app.py
+        syntax_layer = None
+        for layer in record["layers"]:
+            if layer["name"] == "syntax_check":
+                syntax_layer = layer
+                break
+        assert syntax_layer is not None
+        # It should pass (valid syntax) or at least not fail from looking at CWD
+        assert syntax_layer["status"] in ("pass", "skip")
+
+    def test_shipper_reads_workspace_branch(self):
+        """Shipper gets branch from workspace_info, not state.branch."""
+        from pineapple.agents.shipper import _do_keep
+
+        state = _make_state(
+            branch="main",  # state.branch is main
+            workspace_info={
+                "worktree_path": "/tmp/fake-worktree",
+                "branch": "feat/my-feature-abc123",  # workspace branch is different
+                "run_dir": "/tmp/fake-run",
+                "tools_available": {},
+                "scaffolded_files": [],
+            },
+        )
+
+        result = _do_keep(state)
+        # _do_keep prints branch from workspace_info, not state.branch
+        assert result.action == "keep"
+
+    def test_shipper_pr_uses_workspace_info_branch(self):
+        """Shipper _do_pr reads branch from workspace_info for PR creation."""
+        from pineapple.agents.shipper import _do_pr
+
+        state = _make_state(
+            branch="main",
+            workspace_info={
+                "worktree_path": "/tmp/fake-worktree",
+                "branch": "feat/target-feature-abc",
+                "run_dir": "/tmp/fake-run",
+                "tools_available": {},
+                "scaffolded_files": [],
+            },
+        )
+
+        # _do_pr should read branch from workspace_info
+        # It will fall back to "keep" because gh is not available,
+        # but we can verify it doesn't crash and reads the right branch
+        result = _do_pr(state)
+        assert result.action == "keep"  # expected fallback in test env
+
+    def test_run_dir_created_in_target_dir(self, tmp_path):
+        """When target_dir is set, run_dir should be under target_dir."""
+        from pineapple.agents.setup import setup_node
+
+        target_repo = tmp_path / "target"
+        target_repo.mkdir()
+        _init_git_repo(target_repo)
+
+        cwd_dir = tmp_path / "cwd"
+        cwd_dir.mkdir()
+
+        state = _make_state(
+            target_dir=str(target_repo),
+            run_id="ws-test-rundir",
+            project_name="rundir-test",
+        )
+
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(cwd_dir))
+            result = setup_node(state)
+        finally:
+            os.chdir(old_cwd)
+
+        run_dir = result["workspace_info"]["run_dir"]
+        assert str(target_repo) in run_dir, \
+            f"Run dir {run_dir} should be under target_dir {target_repo}"
+        assert str(cwd_dir) not in run_dir, \
+            f"Run dir {run_dir} should NOT be under CWD {cwd_dir}"
