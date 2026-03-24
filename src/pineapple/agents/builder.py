@@ -1,13 +1,14 @@
-"""Stage 5: Builder — generate code for each task in the plan.
+"""Stage 5: Builder -- generate code for each task in the plan and write to disk.
 
 Uses the LLM router to generate BuildResult per task via Instructor.
+After generation, files are written to the workspace and committed via git.
 Install dependencies with: pip install 'pineapple-pipeline[llm]'
 """
-from __future__ import annotations
+import os
+import subprocess
+from pathlib import Path
 
-from datetime import datetime, timezone
-
-from pineapple.models import BuildResult, Task, TaskPlan
+from pineapple.models import BuildResult, FileWrite, Task, TaskPlan
 from pineapple.state import PipelineState
 
 # ---------------------------------------------------------------------------
@@ -15,7 +16,7 @@ from pineapple.state import PipelineState
 # ---------------------------------------------------------------------------
 
 _HAS_LLM_DEPS = True
-_IMPORT_ERROR: str | None = None
+_IMPORT_ERROR = None  # type: str | None
 
 try:
     from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES
@@ -36,13 +37,16 @@ _MAX_TOKENS = 4096
 
 _SYSTEM_PROMPT = """\
 You are an expert software engineer. You are given a task from a project plan.
-Your job is to generate a BuildResult describing what code you would write.
+Your job is to generate a BuildResult containing REAL, working implementation code.
+
+IMPORTANT: You MUST populate the `files_written` list with actual file contents.
+Each entry needs a `path` (relative to project root) and `content` (the full file text).
 
 ISOLATION: You can only write code. You cannot run tests, deploy, or modify
 infrastructure. Focus solely on implementation.
 
-Be specific about what files you would create or modify and what the
-implementation approach would be."""
+Write production-quality code. Do NOT return placeholders, descriptions, or
+pseudo-code. Return actual runnable implementation."""
 
 _USER_PROMPT_TEMPLATE = """\
 Task ID: {task_id}
@@ -54,8 +58,72 @@ Complexity: {complexity}
 Design context:
 {design_summary}
 
-Generate a BuildResult for this task. Mark status as "completed" with a
-commit message describing the change."""
+Generate a BuildResult for this task.
+- Set status to "completed"
+- Include a commit message in `commits` describing the change
+- Populate `files_written` with the ACTUAL file contents for every file listed above.
+  Each entry must have `path` (relative path) and `content` (full file text)."""
+
+
+# ---------------------------------------------------------------------------
+# File writing
+# ---------------------------------------------------------------------------
+
+
+def _write_files_to_disk(
+    files_written: list[FileWrite], workspace: str
+) -> list[str]:
+    """Write files from BuildResult to disk. Returns list of written paths."""
+    written = []
+    base = Path(workspace)
+    for fw in files_written:
+        if not fw.path or not fw.content:
+            continue
+        filepath = base / fw.path
+        try:
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            filepath.write_text(fw.content, encoding="utf-8")
+            written.append(fw.path)
+        except OSError as exc:
+            print(f"    [WARN] Could not write {fw.path}: {exc}")
+    return written
+
+
+# ---------------------------------------------------------------------------
+# Git helpers
+# ---------------------------------------------------------------------------
+
+
+def _run_git(*args: str, cwd: str = None) -> subprocess.CompletedProcess:
+    """Run a git command safely, returning CompletedProcess."""
+    return subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=cwd,
+    )
+
+
+def _git_commit(workspace: str, message: str) -> bool:
+    """Stage all changes and commit in the workspace. Returns True on success."""
+    try:
+        result = _run_git("rev-parse", "--is-inside-work-tree", cwd=workspace)
+        if result.returncode != 0:
+            return False
+
+        _run_git("add", "-A", cwd=workspace)
+
+        # Check if there is anything to commit
+        status = _run_git("diff", "--cached", "--quiet", cwd=workspace)
+        if status.returncode == 0:
+            # Nothing staged
+            return False
+
+        result = _run_git("commit", "-m", message, cwd=workspace)
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +160,44 @@ def _call_llm_for_task(task: Task, design_summary: str, llm=None) -> BuildResult
 # ---------------------------------------------------------------------------
 
 
+def _generate_stub_content(file_path: str, task_description: str) -> str:
+    """Generate minimal stub content based on file extension."""
+    if file_path.endswith(".py"):
+        return (
+            f'"""Auto-generated stub for: {task_description}\n'
+            f'\n'
+            f'File: {file_path}\n'
+            f'TODO: Implement this module.\n'
+            f'"""\n'
+        )
+    elif file_path.endswith((".yml", ".yaml")):
+        return f"# Auto-generated stub for: {task_description}\n# File: {file_path}\n"
+    elif file_path.endswith(".json"):
+        return "{}\n"
+    elif file_path.endswith((".md", ".txt", ".rst")):
+        return f"# {task_description}\n\nTODO: Fill in content.\n"
+    else:
+        return f"// Auto-generated stub for: {task_description}\n"
+
+
 def _build_task_fallback(task: Task) -> BuildResult:
-    """Create a placeholder BuildResult without LLM."""
+    """Create a BuildResult with stub files from the task's file lists."""
+    all_files = list(task.files_to_create or []) + list(task.files_to_modify or [])
+    files_written = []
+    for fp in all_files:
+        if fp and isinstance(fp, str):
+            files_written.append(
+                FileWrite(
+                    path=fp,
+                    content=_generate_stub_content(fp, task.description),
+                )
+            )
     return BuildResult(
         task_id=task.id,
         status="completed",
-        commits=[f"placeholder: {task.description}"],
+        commits=[f"feat: {task.description}"],
         errors=[],
+        files_written=files_written,
     )
 
 
@@ -123,7 +222,7 @@ def _make_error_result(task_id: str, error: str) -> BuildResult:
 
 
 def builder_node(state: PipelineState) -> dict:
-    """Generate code for each task in the plan.
+    """Generate code for each task in the plan and write files to disk.
 
     ISOLATED: Can only write code, cannot run tests.
 
@@ -134,6 +233,11 @@ def builder_node(state: PipelineState) -> dict:
     """
     project_name = state.get("project_name", "unknown")
     print(f"[Stage 5: Build] Project: {project_name}")
+
+    # Resolve workspace path
+    workspace_info = state.get("workspace_info") or {}
+    workspace = workspace_info.get("worktree_path") or os.getcwd()
+    print(f"  [Build] Workspace: {workspace}")
 
     # Parse task plan from state -- lightweight path may skip planner
     task_plan_data = state.get("task_plan")
@@ -163,9 +267,10 @@ def builder_node(state: PipelineState) -> dict:
         provider = llm.provider
         print(f"  [Build] Using provider: {provider}")
 
-    build_results: list[dict] = []
+    build_results = []  # type: list[dict]
     total_cost = 0.0
     cost_per_task = COST_ESTIMATES.get(provider, 0.01)
+    total_files_written = 0
 
     for task in task_plan.tasks:
         print(f"  [Build] Task {task.id}: {task.description}")
@@ -176,19 +281,38 @@ def builder_node(state: PipelineState) -> dict:
                 # Ensure task_id matches
                 result.task_id = task.id
                 total_cost += cost_per_task
-                print(f"    Status: {result.status}, Commits: {len(result.commits)}")
+                print(f"    Status: {result.status}, Commits: {len(result.commits)}, Files: {len(result.files_written)}")
             except Exception as e:
                 print(f"    ERROR: {e}")
                 result = _make_error_result(task.id, str(e))
         else:
             result = _build_task_fallback(task)
-            print(f"    Status: {result.status} (fallback)")
+            print(f"    Status: {result.status} (fallback), Files: {len(result.files_written)}")
+
+        # Write files to disk
+        if result.files_written and result.status == "completed":
+            written = _write_files_to_disk(result.files_written, workspace)
+            total_files_written += len(written)
+            if written:
+                print(f"    Wrote {len(written)} file(s): {', '.join(written)}")
+
+            # Git commit for this task
+            if result.commits:
+                commit_msg = result.commits[0]
+            else:
+                commit_msg = f"build({task.id}): {task.description}"
+            committed = _git_commit(workspace, commit_msg)
+            if committed:
+                print(f"    Committed: {commit_msg}")
+            else:
+                print(f"    Git commit skipped (no git or nothing to commit)")
 
         build_results.append(result.model_dump())
 
     completed = sum(1 for r in build_results if r["status"] == "completed")
     failed = sum(1 for r in build_results if r["status"] == "failed")
     print(f"  [Build] Done: {completed} completed, {failed} failed out of {len(build_results)} tasks")
+    print(f"  [Build] Total files written to disk: {total_files_written}")
 
     # Increment build attempt count for observability
     attempt_counts = dict(state.get("attempt_counts", {}))

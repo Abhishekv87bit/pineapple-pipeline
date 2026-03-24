@@ -3,12 +3,12 @@
 Pure Python — no LLM calls. FRESH CONTEXT: no build knowledge.
 ISOLATED: Can only run tests, cannot write code.
 """
-from __future__ import annotations
 
 import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from pineapple.models import LayerResult, VerificationRecord
 from pineapple.state import PipelineState
@@ -19,7 +19,7 @@ from pineapple.state import PipelineState
 # ---------------------------------------------------------------------------
 
 
-def _run_pytest() -> LayerResult:
+def _run_pytest(workspace: Optional[str] = None) -> LayerResult:
     """Layer 1: Run pytest if available."""
     try:
         result = subprocess.run(
@@ -27,6 +27,7 @@ def _run_pytest() -> LayerResult:
             capture_output=True,
             text=True,
             timeout=120,
+            cwd=workspace,
         )
         output = result.stdout + result.stderr
 
@@ -73,9 +74,9 @@ def _run_pytest() -> LayerResult:
         )
 
 
-def _check_test_files_exist() -> LayerResult:
+def _check_test_files_exist(workspace: Optional[str] = None) -> LayerResult:
     """Layer 2: Check if test files exist in the project."""
-    cwd = Path.cwd()
+    cwd = Path(workspace) if workspace else Path.cwd()
     test_patterns = ["test_*.py", "*_test.py", "tests/**/*.py"]
     test_files: list[str] = []
 
@@ -99,9 +100,9 @@ def _check_test_files_exist() -> LayerResult:
         )
 
 
-def _check_syntax() -> LayerResult:
+def _check_syntax(workspace: Optional[str] = None) -> LayerResult:
     """Layer 3: Basic Python syntax check via py_compile."""
-    cwd = Path.cwd()
+    cwd = Path(workspace) if workspace else Path.cwd()
     py_files = list(cwd.glob("src/**/*.py"))
     if not py_files:
         py_files = list(cwd.glob("**/*.py"))
@@ -150,9 +151,10 @@ def _check_syntax() -> LayerResult:
     )
 
 
-def _run_security_scan() -> LayerResult:
+def _run_security_scan(workspace: Optional[str] = None) -> LayerResult:
     """Layer 4: Security scan via bandit + pattern matching."""
     findings: list[str] = []
+    cwd = Path(workspace) if workspace else Path.cwd()
 
     # Try bandit first
     bandit_available = False
@@ -162,6 +164,7 @@ def _run_security_scan() -> LayerResult:
             capture_output=True,
             text=True,
             timeout=60,
+            cwd=str(cwd),
         )
         bandit_available = True
         if result.returncode != 0 and result.stdout.strip():
@@ -184,7 +187,6 @@ def _run_security_scan() -> LayerResult:
         findings.append("bandit timed out after 60s")
 
     # Fallback / supplement: regex pattern scan for common issues
-    cwd = Path.cwd()
     py_files = list(cwd.glob("src/**/*.py"))
     if not py_files:
         py_files = list(cwd.glob("**/*.py"))
@@ -233,8 +235,9 @@ def _run_security_scan() -> LayerResult:
     )
 
 
-def _run_code_quality() -> LayerResult:
+def _run_code_quality(workspace: Optional[str] = None) -> LayerResult:
     """Layer 5: Code quality via ruff or flake8."""
+    run_cwd = workspace or None
     # Try ruff first (faster, modern)
     for tool_name, cmd in [
         ("ruff", ["ruff", "check", "src", "--select", "F,E,W", "--no-fix", "--output-format", "text"]),
@@ -246,6 +249,7 @@ def _run_code_quality() -> LayerResult:
                 capture_output=True,
                 text=True,
                 timeout=60,
+                cwd=run_cwd,
             )
             output = result.stdout.strip()
             if result.returncode == 0:
@@ -290,8 +294,9 @@ def _run_code_quality() -> LayerResult:
     )
 
 
-def _run_domain_validation() -> LayerResult:
+def _run_domain_validation(workspace: Optional[str] = None) -> LayerResult:
     """Layer 6: Domain-specific validation for Pineapple Pipeline."""
+    cwd = Path(workspace) if workspace else Path.cwd()
     issues: list[str] = []
     checks_run = 0
 
@@ -303,6 +308,7 @@ def _run_domain_validation() -> LayerResult:
             capture_output=True,
             text=True,
             timeout=15,
+            cwd=str(cwd),
         )
         if result.returncode != 0:
             issues.append(f"Model import failed: {result.stderr.strip()[:150]}")
@@ -329,6 +335,7 @@ def _run_domain_validation() -> LayerResult:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                cwd=str(cwd),
             )
             if result.returncode != 0:
                 issues.append(f"Import {mod} failed: {result.stderr.strip()[:100]}")
@@ -337,7 +344,6 @@ def _run_domain_validation() -> LayerResult:
 
     # Check 3: Anti-pattern detection from dogfood lessons
     checks_run += 1
-    cwd = Path.cwd()
     agent_files = list(cwd.glob("src/pineapple/agents/*.py"))
     anti_patterns = [
         (re.compile(r'from pineapple\.agents\.builder\b'), "verifier.py", "verifier imports builder (isolation violation)"),
@@ -407,6 +413,15 @@ def verifier_node(state: PipelineState) -> dict:
     project_name = state.get("project_name", "unknown")
     print(f"[Stage 6: Verify] Project: {project_name}")
 
+    # Resolve workspace path: prefer worktree from setup, fall back to CWD
+    workspace_info = state.get("workspace_info") or {}
+    workspace = workspace_info.get("worktree_path")
+
+    if workspace:
+        print(f"  [Verify] Workspace: {workspace}")
+    else:
+        print("  [Verify] Workspace: using CWD (no worktree)")
+
     layer_runners = [
         ("Layer 1: Running pytest...", _run_pytest),
         ("Layer 2: Checking test files...", _check_test_files_exist),
@@ -419,7 +434,7 @@ def verifier_node(state: PipelineState) -> dict:
     layers: list[LayerResult] = []
     for label, runner in layer_runners:
         print(f"  [Verify] {label}")
-        result = runner()
+        result = runner(workspace=workspace)
         layers.append(result)
         print(f"    Result: {result.status} — {result.details[:80]}")
 

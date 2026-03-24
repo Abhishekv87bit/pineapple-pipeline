@@ -1,0 +1,54 @@
+{
+  "phase": "v2b",
+  "verified_at": "2026-03-23",
+  "verifier": "Claude Opus 4.6 (1M context)",
+  "method": "real execution with real inputs",
+  "python": "C:/Users/abhis/AppData/Local/Programs/Python/Python312/python.exe (3.12)",
+  "summary": "4/4 HIGH bugs verified PASS, 98/98 tests pass",
+  "bugs": {
+    "H-3": {
+      "title": "Builder writes files to disk",
+      "status": "PASS",
+      "evidence": [
+        "_write_files_to_disk created 2 files (src/hello.py: 14 bytes, tests/test_hello.py: 22 bytes)",
+        "_build_task_fallback produced 1 FileWrite with 94 chars for src/logger.py"
+      ]
+    },
+    "H-4": {
+      "title": "Ship reads workspace_info.branch",
+      "status": "PASS",
+      "evidence": [
+        "ship_node ran without KeyError on workspace_info.branch",
+        "Determined action: pr, fell back to keep (no gh CLI in test env)",
+        "Ship summary printed correctly"
+      ]
+    },
+    "H-5": {
+      "title": "Verifier uses workspace path",
+      "status": "PASS",
+      "evidence": [
+        "_run_pytest: workspace param = True",
+        "_check_test_files_exist: workspace param = True",
+        "_check_syntax: workspace param = True",
+        "_run_security_scan: workspace param = True",
+        "_run_code_quality: workspace param = True",
+        "_run_domain_validation: workspace param = True",
+        "All 6 layer functions accept workspace parameter"
+      ]
+    },
+    "H-6": {
+      "title": "Scaffold uses correct field names",
+      "status": "PASS",
+      "evidence": [
+        "_scaffold_files created 2 files from task.files_to_create",
+        "src/auth.py: 62 bytes, tests/test_auth.py: 69 bytes",
+        "No KeyError on field access"
+      ]
+    }
+  },
+  "test_suite": {
+    "command": "pytest tests/test_agents.py tests/test_integrations.py -v --tb=short",
+    "result": "98 passed, 0 failed, 1 warning",
+    "duration_seconds": 125.24
+  }
+}

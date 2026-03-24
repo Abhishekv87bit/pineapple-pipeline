@@ -82,6 +82,13 @@ class TaskPlan(BaseModel):
 # --- Build ---
 
 
+class FileWrite(BaseModel):
+    """A file to be written to disk during Build."""
+
+    path: str
+    content: str
+
+
 class BuildResult(BaseModel):
     """Result of executing a single task during Build."""
 
@@ -89,6 +96,7 @@ class BuildResult(BaseModel):
     status: Literal["completed", "failed"]
     commits: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    files_written: list[FileWrite] = Field(default_factory=list)
 
 
 # --- Verify ---
@@ -168,6 +176,7 @@ __all__ = [
     "DesignSpec",
     "Task",
     "TaskPlan",
+    "FileWrite",
     "BuildResult",
     "LayerResult",
     "VerificationRecord",

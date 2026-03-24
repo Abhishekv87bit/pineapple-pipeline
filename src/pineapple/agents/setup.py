@@ -154,7 +154,7 @@ def _scaffold_files(task_plan: dict, worktree_path: str = None) -> list:
         return []
 
     for task in tasks:
-        files = task.get("files", [])
+        files = task.get("files_to_create", []) + task.get("files_to_modify", [])
         for file_path in files:
             if not file_path or not isinstance(file_path, str):
                 continue

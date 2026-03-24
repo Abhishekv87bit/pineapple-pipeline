@@ -60,7 +60,8 @@ def _do_pr(state: PipelineState) -> ShipResult:
     """Create a pull request via gh CLI."""
     project_name = state.get("project_name", "unknown")
     request = state.get("request", "")
-    branch = state.get("branch", "")
+    workspace_info = state.get("workspace_info") or {}
+    branch = workspace_info.get("branch", "")
 
     # Build PR title
     title = f"[{project_name}] {request}"
@@ -206,7 +207,8 @@ def _do_merge(state: PipelineState) -> ShipResult:
 
 def _do_keep(state: PipelineState) -> ShipResult:
     """Keep code on branch — no git operations."""
-    branch = state.get("branch", "current branch")
+    workspace_info = state.get("workspace_info") or {}
+    branch = workspace_info.get("branch", "current branch")
     print(f"  [Ship] Code stays on branch: {branch}")
     print("  [Ship] No git operations performed")
     return ShipResult(action="keep", pr_url=None, merge_commit=None)
@@ -214,8 +216,8 @@ def _do_keep(state: PipelineState) -> ShipResult:
 
 def _do_discard(state: PipelineState) -> ShipResult:
     """Discard work: remove worktree and delete branch."""
-    branch = state.get("branch", "")
-    workspace_info = state.get("workspace_info")
+    workspace_info = state.get("workspace_info") or {}
+    branch = workspace_info.get("branch", "")
 
     # Remove worktree if one exists
     if workspace_info:
