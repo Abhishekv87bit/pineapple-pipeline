@@ -123,9 +123,22 @@ def _call_llm(system: str, user: str) -> tuple[TaskPlan, str, float]:
 
 
 def _make_error_plan(error: str) -> TaskPlan:
-    """Create a stub TaskPlan for error cases."""
+    """Create a stub TaskPlan for error cases.
+
+    Includes a single failed task so the error message is visible in the plan.
+    """
+    from pineapple.models import Task
+
     return TaskPlan(
-        tasks=[],
+        tasks=[
+            Task(
+                id="ERR-1",
+                description=f"Error during planning: {error}",
+                complexity="trivial",
+                estimated_cost_usd=0.0,
+                status="failed",
+            )
+        ],
         total_estimated_cost_usd=0.0,
         approved=False,
     )

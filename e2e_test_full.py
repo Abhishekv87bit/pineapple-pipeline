@@ -3,6 +3,12 @@
 Runs: intake -> strategic_review -> architecture -> plan -> setup ->
       build -> verify -> review -> ship -> evolve
 No interrupt_before gates -- runs non-stop with pre-populated human_approvals.
+
+NOTE: This test builds its own LangGraph graph instead of using the production
+graph from pineapple.graph.create_pipeline(). This is intentional (K-3):
+the production graph uses interrupt_before gates that require interactive human
+approval, which cannot run in an automated E2E test. Human approvals are
+pre-populated in initial_state to simulate gate passage.
 """
 import json, sys, traceback, uuid, time, os
 from datetime import datetime

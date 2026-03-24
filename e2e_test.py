@@ -1,4 +1,11 @@
-"""Pineapple Pipeline v2 -- E2E Test (Lightweight Path + Gemini)"""
+"""Pineapple Pipeline v2 -- E2E Test (Lightweight Path + Gemini)
+
+NOTE: This test builds its own LangGraph graph instead of using the production
+graph from pineapple.graph.create_pipeline(). This is intentional (K-3):
+the production graph uses interrupt_before gates that require interactive human
+approval, which cannot run in an automated E2E test. This test bypasses those
+gates to verify that every agent node executes correctly end-to-end.
+"""
 import json, sys, traceback, uuid
 from datetime import datetime
 from langgraph.checkpoint.memory import MemorySaver

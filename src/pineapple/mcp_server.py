@@ -18,6 +18,15 @@ mcp = FastMCP("pineapple-pipeline")
 DEFAULT_DB_PATH = ".pineapple/checkpoints.db"
 
 
+def _flush() -> None:
+    """Flush LLM traces (LangFuse) if available. Safe no-op otherwise."""
+    try:
+        from pineapple.llm import flush_traces
+        flush_traces()
+    except Exception:
+        pass
+
+
 def _get_pipeline(db_path: str = DEFAULT_DB_PATH):
     """Create a compiled pipeline with SQLite checkpointer."""
     from pineapple.graph import create_pipeline
@@ -101,12 +110,14 @@ def pineapple_run(
         config = {"configurable": {"thread_id": run_id}}
         pipeline.invoke(initial_state, config)
 
+        _flush()
         state = pipeline.get_state(config)
         summary = _state_summary(state)
         summary["action"] = "run_started"
         return json.dumps(summary, indent=2)
 
     except Exception as exc:
+        _flush()
         return json.dumps({"error": str(exc), "run_id": run_id})
 
 
@@ -184,6 +195,7 @@ def pineapple_approve(run_id: str) -> str:
         )
         pipeline.invoke(None, config)
 
+        _flush()
         # Get updated state
         new_state = pipeline.get_state(config)
         summary = _state_summary(new_state)
@@ -192,6 +204,7 @@ def pineapple_approve(run_id: str) -> str:
         return json.dumps(summary, indent=2)
 
     except Exception as exc:
+        _flush()
         return json.dumps({"error": str(exc), "run_id": run_id})
 
 
