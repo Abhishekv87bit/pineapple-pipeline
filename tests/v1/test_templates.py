@@ -13,14 +13,15 @@ import re
 import sys
 from pathlib import Path
 
-# Make the tools/ directory importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+# Make the tools/ directory importable (parent.parent.parent = repo root since tests moved to tests/v1/)
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "tools"))
 
 import pytest
 from apply_pipeline import detect_project, fill_template
 
 # ── Paths ──
-TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
+TEMPLATE_DIR = _REPO_ROOT / "templates"
 
 # ── Helpers ──
 

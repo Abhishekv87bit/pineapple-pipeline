@@ -524,10 +524,10 @@ class TestLangGraphIntegration:
         assert restored_state is not None
         assert restored_state.values.get("run_id") == "test-resume-run"
 
-    def test_route_by_path_lightweight_skips_to_build(self):
-        """Lightweight path should route from intake directly to build."""
+    def test_route_by_path_lightweight_routes_to_setup(self):
+        """Lightweight path should route from intake to setup (not skip it)."""
         result = route_by_path(_make_state(path="lightweight"))
-        assert result == "build"
+        assert result == "setup"
 
     def test_route_by_path_medium_skips_to_plan(self):
         """Medium path should route from intake to plan (skip stages 1-2)."""

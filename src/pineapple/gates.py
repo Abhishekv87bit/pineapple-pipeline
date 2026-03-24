@@ -34,12 +34,12 @@ def route_by_path(state: PipelineState) -> str:
     Returns:
         "strategic_review" for full path,
         "plan" for medium path,
-        "build" for lightweight path.
+        "setup" for lightweight path.
     """
     mapping = {
         "full": "strategic_review",
         "medium": "plan",
-        "lightweight": "build",
+        "lightweight": "setup",
     }
     path = state.get("path", "full")
     return mapping.get(path, "strategic_review")
@@ -59,19 +59,35 @@ def _check_review_cycle(state: PipelineState) -> str:
     return "pass"
 
 
-def review_gate(state: PipelineState) -> str:
+def review_gate(state: PipelineState, max_attempts: int = 5) -> str:
     """Decide what happens after the review stage.
+
+    Uses a DUAL protection strategy:
+    1. Hard ceiling on total build attempts (catches alternating pass/fail)
+    2. PyBreaker circuit breaker (catches consecutive failures)
+
+    Args:
+        max_attempts: Absolute maximum build attempts regardless of PyBreaker
+                      state. Default 5 (higher than PyBreaker's fail_max=3
+                      since PyBreaker already handles consecutive failures).
 
     Returns:
         "pass"  -> proceed to ship
         "retry" -> loop back to build
         "fail"  -> escalate to human intervention
     """
+    # Hard ceiling: absolute max attempts regardless of PyBreaker state.
+    # This prevents infinite loops when the reviewer alternates between
+    # pass and fail (which resets PyBreaker's consecutive failure counter).
+    attempt_counts = state.get("attempt_counts", {})
+    if attempt_counts.get("build", 0) >= max_attempts:
+        return "fail"
+
     # Cost ceiling (independent of circuit breaker)
     if state.get("cost_total_usd", 0.0) > 200.0:
         return "fail"
 
-    # Run the review check through the circuit breaker
+    # PyBreaker handles consecutive failures (opens after 3 in a row)
     try:
         result = build_loop_breaker.call(_check_review_cycle, state)
         return result

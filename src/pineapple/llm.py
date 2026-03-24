@@ -80,7 +80,7 @@ _DEFAULT_MODELS: dict[str, str] = {
 
 # Rough cost estimates per call (USD) -- used for cost tracking
 COST_ESTIMATES: dict[str, float] = {
-    PROVIDER_GEMINI: 0.0,   # free tier
+    PROVIDER_GEMINI: 0.001,  # approximate per-call cost (free tier is not truly $0)
     PROVIDER_CLAUDE: 0.02,  # ~$3/1M input, $15/1M output
 }
 

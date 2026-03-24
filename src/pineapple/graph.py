@@ -140,7 +140,7 @@ def create_pipeline(checkpointer=_SENTINEL, db_path=".pineapple/checkpoints.db")
         {
             "strategic_review": "strategic_review",
             "plan": "plan",
-            "build": "build",
+            "setup": "setup",
         },
     )
 

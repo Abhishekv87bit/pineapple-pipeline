@@ -1,0 +1,54 @@
+{
+  "verification_date": "2026-03-23",
+  "verifier": "claude-opus-4.6",
+  "method": "runtime execution with real inputs",
+  "python": "C:/Users/abhis/AppData/Local/Programs/Python/Python312/python.exe (3.12.8)",
+  "fixes": {
+    "C-1": {
+      "title": "Review gate infinite loop",
+      "verdict": "WORKING",
+      "evidence": {
+        "consecutive_failures": "3 consecutive failures trigger PyBreaker circuit breaker -> returns 'fail' (attempts 1-2 return 'retry', attempt 3+ returns 'fail')",
+        "alternating_pass_fail": "Alternating pass/fail resets breaker but hard ceiling at attempt 5 still triggers 'fail' (attempts 1-4 alternate retry/pass, attempt 5 returns 'fail', attempt 6 returns 'fail')",
+        "hard_ceiling": "attempt_counts.build >= 5 returns 'fail' regardless of review_result or breaker state",
+        "gemini_cost": "COST_ESTIMATES['gemini'] = 0.001 (non-zero, confirmed)"
+      },
+      "dual_protection_confirmed": true,
+      "notes": "Original test script expected attempts 1-4 to return 'retry' but that assumed non-consecutive failures. With all-fail inputs, PyBreaker opens at 3 consecutive failures (by design). Alternating test confirmed hard ceiling works independently."
+    },
+    "C-2": {
+      "title": "Lightweight path routes through setup",
+      "verdict": "WORKING",
+      "evidence": {
+        "full_path": "full -> strategic_review",
+        "medium_path": "medium -> plan",
+        "lightweight_path": "lightweight -> setup",
+        "assertions": "All 3 path assertions PASSED"
+      }
+    },
+    "C-3": {
+      "title": "v1 tests moved, v2 agent tests work",
+      "verdict": "WORKING",
+      "evidence": {
+        "agent_tests": "45 passed, 0 failed (test_agents.py)",
+        "integration_tests": "53 passed, 0 failed (test_integrations.py)",
+        "v1_tests_relocated": "14 v1 test files found in tests/v1/ directory",
+        "no_v1_imports_in_root": "grep returned empty - no v1 imports (pipeline_state, pineapple_audit, pineapple_config, pineapple_verify) found in root tests/test_*.py"
+      },
+      "v1_files_in_tests_v1": [
+        "test_apply_pipeline.py",
+        "test_pineapple_audit.py",
+        "test_pineapple_cleanup.py",
+        "test_pineapple_config.py",
+        "test_pineapple_doctor.py",
+        "test_pineapple_evolve.py",
+        "test_pineapple_upgrade.py",
+        "test_pineapple_verify.py",
+        "test_pipeline_state.py",
+        "test_pipeline_tracer.py",
+        "test_templates.py"
+      ]
+    }
+  },
+  "summary": "All 3 critical fixes verified WORKING via runtime execution. 98 tests pass (45 agent + 53 integration). No fake/stubbed behavior detected."
+}
