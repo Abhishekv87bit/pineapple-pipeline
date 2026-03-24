@@ -228,11 +228,12 @@ class TestTenacityIntegration:
         mock_client.create = MagicMock(side_effect=side_effect)
 
         with patch("pineapple.agents.strategic_review.get_llm_client", return_value=mock_client):
-            brief, provider = _call_llm("system prompt", "user prompt")
+            brief, provider, cost = _call_llm("system prompt", "user prompt")
 
         assert call_count == 3
         assert brief.what == "Test project"
         assert provider == "gemini"
+        assert isinstance(cost, float)
 
     def test_retry_exhausted_after_three_failures(self):
         """Mock LLM to fail 4 times -- Tenacity should stop after 3 and raise."""
