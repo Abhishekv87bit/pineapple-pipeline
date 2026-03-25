@@ -154,8 +154,14 @@ def _resolve_provider(stage: str | None = None) -> str:
 # Client factory
 # ---------------------------------------------------------------------------
 
-def _make_gemini_client() -> instructor.Instructor:
-    """Create an Instructor-patched Gemini client using google.genai."""
+def _make_gemini_client(mode: instructor.Mode | None = None) -> instructor.Instructor:
+    """Create an Instructor-patched Gemini client using google.genai.
+
+    Args:
+        mode: Instructor mode override. Defaults to GENAI_STRUCTURED_OUTPUTS.
+              Use GENAI_TOOLS for stages with complex nested Pydantic models
+              that Gemini's structured output mode can't handle reliably.
+    """
     from google import genai
 
     api_key = _get_gemini_api_key()
@@ -163,7 +169,8 @@ def _make_gemini_client() -> instructor.Instructor:
         raise ValueError("Gemini API key not found (GOOGLE_API_KEY / GEMINI_API_KEY)")
 
     raw_client = genai.Client(api_key=api_key)
-    return instructor.from_genai(raw_client, mode=instructor.Mode.GENAI_STRUCTURED_OUTPUTS)
+    effective_mode = mode or instructor.Mode.GENAI_STRUCTURED_OUTPUTS
+    return instructor.from_genai(raw_client, mode=effective_mode)
 
 
 def _make_claude_client() -> instructor.Instructor:
@@ -389,7 +396,13 @@ def get_llm_client(
     provider = _resolve_provider(stage)
 
     if provider == PROVIDER_GEMINI:
-        client = _make_gemini_client()
+        # Architecture stage uses GENAI_TOOLS mode because DesignSpec has
+        # nested ComponentSpec lists that GENAI_STRUCTURED_OUTPUTS can't
+        # handle reliably with Gemini.
+        gemini_mode = None  # default = GENAI_STRUCTURED_OUTPUTS
+        if stage in ("architecture", "strategic_review"):
+            gemini_mode = instructor.Mode.GENAI_TOOLS
+        client = _make_gemini_client(mode=gemini_mode)
     else:
         client = _make_claude_client()
 

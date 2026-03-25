@@ -247,9 +247,9 @@ def setup_node(state: PipelineState) -> dict:
     else:
         print("  Worktree: skipped (git not available)")
 
-    # 4. Scaffold stub files (only if task_plan exists — skip for lightweight)
+    # 4. Scaffold stub files (only for greenfield — existing projects don't need stubs)
     scaffolded_files = []
-    if task_plan:
+    if task_plan and not target_dir:
         scaffolded_files = _scaffold_files(task_plan, worktree_path)
         if scaffolded_files:
             print(f"  Scaffolded {len(scaffolded_files)} files")
