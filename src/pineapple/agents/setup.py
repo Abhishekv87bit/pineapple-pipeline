@@ -136,7 +136,17 @@ def _setup_worktree(
     if worktree_dir.exists():
         return str(worktree_dir), branch_name
 
-    result = _run_git("worktree", "add", str(worktree_dir), branch_name, cwd=effective_dir)
+    # Enable long paths on Windows to avoid "Filename too long" errors
+    _run_git("config", "core.longpaths", "true", cwd=effective_dir)
+
+    # Use --no-checkout + sparse checkout to avoid populating files we don't need
+    result = _run_git("worktree", "add", "--no-checkout", str(worktree_dir), branch_name, cwd=effective_dir)
+    if result.returncode == 0:
+        # Configure sparse checkout for only the directories we need
+        _run_git("sparse-checkout", "init", "--cone", cwd=str(worktree_dir))
+        _run_git("sparse-checkout", "set", "backend", "frontend", "src", "tests", "docs", cwd=str(worktree_dir))
+        _run_git("checkout", cwd=str(worktree_dir))
+
     if result.returncode != 0:
         print(f"  [WARN] Failed to create worktree: {result.stderr.strip()}")
         # Clean up the branch we just created if worktree failed
