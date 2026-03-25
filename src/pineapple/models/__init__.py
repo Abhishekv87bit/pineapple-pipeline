@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 
+from typing import Any as _Any
+
 from pydantic import BaseModel, Field
 
 
@@ -48,14 +50,43 @@ class ComponentSpec(BaseModel):
     libraries: list[str] = Field(default_factory=list)
 
 
+class TechnologyChoice(BaseModel):
+    """A single technology choice within a design specification.
+
+    Gemini structured output cannot reliably populate free-form dict[str, str]
+    fields. Using an explicit list of (category, choice) pairs avoids this.
+    """
+
+    category: str = Field(description="Technology category, e.g. 'language', 'framework', 'database'")
+    choice: str = Field(description="The chosen technology, e.g. 'Python 3.12', 'FastAPI', 'PostgreSQL'")
+
+
 class DesignSpec(BaseModel):
     """Output of Architecture: technical design with components."""
 
     title: str
     summary: str
     components: list[ComponentSpec] = Field(default_factory=list)
-    technology_choices: dict[str, str] = Field(default_factory=dict)
+    technology_choices_list: list[TechnologyChoice] = Field(
+        default_factory=list,
+        description="Technology choices as structured list (preferred for LLM extraction)",
+    )
     approved: bool = False
+
+    @property
+    def technology_choices(self) -> dict[str, str]:
+        """Return technology choices as a dict for backward compatibility."""
+        return {tc.category: tc.choice for tc in self.technology_choices_list}
+
+    def model_dump(self, **kwargs: _Any) -> dict[str, _Any]:
+        """Override to include technology_choices dict for backward compatibility.
+
+        Downstream consumers (planner, dogfood scripts, JSON artifacts) all
+        expect a ``technology_choices`` dict key in the serialized output.
+        """
+        data = super().model_dump(**kwargs)
+        data["technology_choices"] = {tc.category: tc.choice for tc in self.technology_choices_list}
+        return data
 
 
 # --- Plan ---
@@ -175,6 +206,7 @@ __all__ = [
     "ContextBundle",
     "StrategicBrief",
     "ComponentSpec",
+    "TechnologyChoice",
     "DesignSpec",
     "Task",
     "TaskPlan",

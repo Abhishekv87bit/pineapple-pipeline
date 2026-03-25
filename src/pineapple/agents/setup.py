@@ -266,13 +266,14 @@ def setup_node(state: PipelineState) -> dict:
     else:
         print("  Scaffolding: skipped (no task plan)")
 
-    # Build workspace_info
+    # Build workspace_info (always propagate target_dir for downstream fallback)
     workspace_info = {
         "worktree_path": worktree_path,
         "branch": branch,
         "run_dir": run_dir,
         "tools_available": tools_available,
         "scaffolded_files": scaffolded_files,
+        "target_dir": effective_dir or "",
     }
 
     print("[STAGE 4] Setup complete.")

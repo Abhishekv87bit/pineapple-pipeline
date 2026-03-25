@@ -31,6 +31,7 @@ from pineapple.models import (
     StrategicBrief,
     Task,
     TaskPlan,
+    TechnologyChoice,
     VerificationRecord,
 )
 
@@ -616,7 +617,10 @@ class TestPydanticModels:
                     libraries=["langchain"],
                 )
             ],
-            technology_choices={"language": "python", "framework": "langgraph"},
+            technology_choices_list=[
+                TechnologyChoice(category="language", choice="python"),
+                TechnologyChoice(category="framework", choice="langgraph"),
+            ],
         )
         assert len(ds.components) == 1
         assert ds.components[0].name == "intake"

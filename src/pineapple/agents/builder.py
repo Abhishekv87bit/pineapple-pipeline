@@ -292,13 +292,30 @@ def builder_node(state: PipelineState) -> dict:
     project_name = state.get("project_name", "unknown")
     print(f"[Stage 5: Build] Project: {project_name}")
 
-    # Resolve workspace path: worktree > target_dir > CWD
+    # Resolve workspace path: worktree > target_dir > ERROR (never CWD)
     workspace_info = state.get("workspace_info") or {}
     workspace = (
         workspace_info.get("worktree_path")
         or state.get("target_dir")
-        or os.getcwd()
+        or None
     )
+
+    if not workspace:
+        raise RuntimeError(
+            "Builder has no workspace: both worktree_path and target_dir are empty. "
+            "Cannot fall back to CWD -- that would write to the pipeline repo."
+        )
+
+    # Guard: never write into the pipeline's own repo
+    _pipeline_repo = os.path.normcase(str(Path(__file__).resolve().parents[3]))  # agents/ -> pineapple/ -> src/ -> repo root
+    _resolved_workspace = os.path.normcase(str(Path(workspace).resolve()))
+    if _resolved_workspace == _pipeline_repo or _resolved_workspace.startswith(_pipeline_repo + os.sep):
+        raise RuntimeError(
+            f"Builder would write to the pipeline repo ({_pipeline_repo}), not the target project. "
+            f"Resolved workspace: {_resolved_workspace}. "
+            "Check that target_dir or worktree_path points to the correct project."
+        )
+
     print(f"  [Build] Workspace: {workspace}")
 
     # Parse task plan from state -- lightweight path may skip planner

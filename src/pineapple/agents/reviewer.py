@@ -3,10 +3,19 @@
 Uses the LLM router to generate a ReviewResult via Instructor.
 FRESH CONTEXT: No knowledge of build or verify internals.
 Install dependencies with: pip install 'pineapple-pipeline[llm]'
+
+Supports auto-chunked review: when the diff is large (configurable via
+PINEAPPLE_REVIEW_CHUNK_FILES and PINEAPPLE_REVIEW_CHUNK_LINES env vars),
+changed files are grouped by top-level directory and reviewed independently,
+then merged by severity.
 """
 from __future__ import annotations
 
+import os
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from typing import Any
 
 from pineapple.models import ReviewResult
 from pineapple.state import PipelineState
@@ -30,6 +39,13 @@ except ImportError as exc:
 # ---------------------------------------------------------------------------
 
 _MAX_TOKENS = 4096
+
+# ---------------------------------------------------------------------------
+# Chunking thresholds (configurable via env vars)
+# ---------------------------------------------------------------------------
+
+_CHUNK_FILES_THRESHOLD = int(os.environ.get("PINEAPPLE_REVIEW_CHUNK_FILES", "50"))
+_CHUNK_LINES_THRESHOLD = int(os.environ.get("PINEAPPLE_REVIEW_CHUNK_LINES", "5000"))
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -61,6 +77,138 @@ _USER_PROMPT_TEMPLATE = """\
 
 Review the implementation against the spec and test results.
 Produce a ReviewResult with your verdict and categorized issues."""
+
+_CHUNK_SYSTEM_PROMPT = """\
+You are a senior code reviewer reviewing a SUBSET of changes in module: {module_name}.
+You receive:
+1. A design specification (what SHOULD have been built)
+2. Files changed in this module
+3. Build results relevant to this module
+4. Verification results (test outcomes)
+
+Your job is to review ONLY this module's changes against the spec and tests, then
+produce a verdict:
+- "pass" — this module's implementation matches spec, tests pass
+- "retry" — fixable issues found in this module
+- "fail" — fundamental problems in this module
+
+Be specific about issues found. Categorize them as critical, important, or minor.
+Prefix each issue with the module name in brackets, e.g. [kfs_core] Missing validation."""
+
+_CHUNK_USER_PROMPT_TEMPLATE = """\
+## Module Under Review: {module_name}
+Files in this chunk: {file_list}
+
+## Design Specification
+{design_spec}
+
+## Build Results (filtered to this module)
+{build_results}
+
+## Verification Results
+{verify_record}
+
+Review this module's implementation against the spec and test results.
+Produce a ReviewResult with your verdict and categorized issues."""
+
+
+# ---------------------------------------------------------------------------
+# Diff chunking
+# ---------------------------------------------------------------------------
+
+
+def chunk_diff_by_module(
+    changed_files: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group changed files by top-level directory (module).
+
+    Args:
+        changed_files: List of dicts, each with at least a ``path`` key
+            and optionally a ``lines_changed`` key (int, default 1).
+
+    Returns:
+        List of chunk dicts, each containing:
+            - module: str — top-level directory name (or "_root" for root files)
+            - files: list[dict] — the file entries in this chunk
+            - file_count: int
+            - lines_changed: int — sum of lines_changed across files
+    """
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for entry in changed_files:
+        path = entry.get("path", "")
+        # Normalise separators
+        path = path.replace("\\", "/")
+        parts = path.split("/")
+        module = parts[0] if len(parts) > 1 else "_root"
+        groups[module].append(entry)
+
+    chunks = []
+    for module, files in sorted(groups.items()):
+        total_lines = sum(f.get("lines_changed", 1) for f in files)
+        chunks.append({
+            "module": module,
+            "files": files,
+            "file_count": len(files),
+            "lines_changed": total_lines,
+        })
+
+    return chunks
+
+
+def _should_chunk(changed_files: list[dict[str, Any]]) -> bool:
+    """Decide whether the diff should be chunked based on thresholds."""
+    if not changed_files:
+        return False
+    total_files = len(changed_files)
+    total_lines = sum(f.get("lines_changed", 1) for f in changed_files)
+    return total_files > _CHUNK_FILES_THRESHOLD or total_lines > _CHUNK_LINES_THRESHOLD
+
+
+def _merge_chunk_results(chunk_results: list[dict[str, Any]]) -> ReviewResult:
+    """Merge multiple chunk ReviewResults into a single ReviewResult.
+
+    Verdict priority: fail > retry > pass.
+    Issues are concatenated and deduplicated.
+    """
+    all_critical: list[str] = []
+    all_important: list[str] = []
+    all_minor: list[str] = []
+    worst_verdict = "pass"
+
+    verdict_rank = {"pass": 0, "retry": 1, "fail": 2}
+
+    for cr in chunk_results:
+        result = cr["result"]
+        v = result.get("verdict", "pass") if isinstance(result, dict) else result.verdict
+        if verdict_rank.get(v, 0) > verdict_rank.get(worst_verdict, 0):
+            worst_verdict = v
+
+        if isinstance(result, dict):
+            all_critical.extend(result.get("critical_issues", []))
+            all_important.extend(result.get("important_issues", []))
+            all_minor.extend(result.get("minor_issues", []))
+        else:
+            all_critical.extend(result.critical_issues)
+            all_important.extend(result.important_issues)
+            all_minor.extend(result.minor_issues)
+
+    # Deduplicate while preserving order
+    def _dedup(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    return ReviewResult(
+        verdict=worst_verdict,
+        critical_issues=_dedup(all_critical),
+        important_issues=_dedup(all_important),
+        minor_issues=_dedup(all_minor),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +250,123 @@ def _call_llm(design_spec: str, build_results: str, verify_record: str, is_light
     usage = _extract_usage(result, llm.provider)
     cost = estimate_cost(llm.provider, usage)
     return result, llm.provider, cost
+
+
+def _call_llm_chunk(
+    module_name: str,
+    file_list: list[str],
+    design_spec: str,
+    build_results: str,
+    verify_record: str,
+    is_lightweight: bool = False,
+) -> tuple[ReviewResult, str, float]:
+    """Call the LLM for a single chunk/module review."""
+    llm = get_llm_client(stage="review")
+
+    system = _CHUNK_SYSTEM_PROMPT.format(module_name=module_name)
+    if is_lightweight:
+        system += (
+            "\n\nIMPORTANT: This is a LIGHTWEIGHT path (bug fix / small change). "
+            "Minimal or sparse build output is expected and acceptable. "
+            "Do NOT flag empty or minimal results as critical issues. "
+            "Only flag genuine implementation errors as critical."
+        )
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=30))
+    def _inner() -> ReviewResult:
+        return llm.create(
+            response_model=ReviewResult,
+            system=system,
+            messages=[{"role": "user", "content": _CHUNK_USER_PROMPT_TEMPLATE.format(
+                module_name=module_name,
+                file_list=", ".join(file_list),
+                design_spec=design_spec,
+                build_results=build_results,
+                verify_record=verify_record,
+            )}],
+            max_tokens=_MAX_TOKENS,
+        )
+
+    result = _inner()
+    usage = _extract_usage(result, llm.provider)
+    cost = estimate_cost(llm.provider, usage)
+    return result, llm.provider, cost
+
+
+# ---------------------------------------------------------------------------
+# Chunked LLM review (parallel dispatch)
+# ---------------------------------------------------------------------------
+
+
+def _review_chunked_llm(
+    chunks: list[dict[str, Any]],
+    design_spec: str,
+    build_results: str,
+    verify_record: str,
+    is_lightweight: bool = False,
+) -> tuple[ReviewResult, float]:
+    """Dispatch parallel LLM reviews for each chunk, merge results.
+
+    Returns (merged_ReviewResult, total_cost_usd).
+    """
+    chunk_results: list[dict[str, Any]] = []
+    total_cost = 0.0
+
+    def _review_one_chunk(chunk: dict) -> dict[str, Any]:
+        module = chunk["module"]
+        file_paths = [f.get("path", "") for f in chunk["files"]]
+        result, provider, cost = _call_llm_chunk(
+            module_name=module,
+            file_list=file_paths,
+            design_spec=design_spec,
+            build_results=build_results,
+            verify_record=verify_record,
+            is_lightweight=is_lightweight,
+        )
+        return {"module": module, "result": result.model_dump(), "provider": provider, "cost": cost}
+
+    # Dispatch in parallel using ThreadPoolExecutor
+    max_workers = min(len(chunks), 5)  # Cap at 5 concurrent reviews
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_review_one_chunk, chunk): chunk for chunk in chunks}
+        for future in as_completed(futures):
+            cr = future.result()
+            chunk_results.append(cr)
+            total_cost += cr["cost"]
+            print(f"    [Chunk: {cr['module']}] Verdict: {cr['result']['verdict']} "
+                  f"(provider: {cr['provider']}, cost: ${cr['cost']:.4f})")
+
+    merged = _merge_chunk_results(chunk_results)
+    return merged, total_cost
+
+
+# ---------------------------------------------------------------------------
+# Chunked fallback review (no LLM)
+# ---------------------------------------------------------------------------
+
+
+def _review_chunked_fallback(
+    chunks: list[dict[str, Any]],
+    build_results: list[dict],
+    verify_record: dict | None,
+    is_lightweight: bool = False,
+) -> ReviewResult:
+    """Produce chunk-aware fallback ReviewResult without LLM."""
+    chunk_results = []
+    for chunk in chunks:
+        module = chunk["module"]
+        # Run per-chunk fallback
+        fr = _review_fallback(build_results, verify_record, is_lightweight=is_lightweight)
+        # Tag issues with module name
+        tagged = ReviewResult(
+            verdict=fr.verdict,
+            critical_issues=[f"[{module}] {i}" for i in fr.critical_issues],
+            important_issues=[f"[{module}] {i}" for i in fr.important_issues],
+            minor_issues=[f"[{module}] {i}" if not i.startswith("[") else i for i in fr.minor_issues],
+        )
+        chunk_results.append({"module": module, "result": tagged.model_dump()})
+
+    return _merge_chunk_results(chunk_results)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +427,11 @@ def reviewer_node(state: PipelineState) -> dict:
     FRESH CONTEXT: No knowledge of how the code was built or tested.
     Reads build_results, verify_record, and design_spec from state.
 
+    When ``changed_files`` is present in state and exceeds the chunking
+    thresholds (PINEAPPLE_REVIEW_CHUNK_FILES / PINEAPPLE_REVIEW_CHUNK_LINES),
+    the review is automatically split by top-level directory and dispatched
+    in parallel (LLM path) or sequentially (fallback path).
+
     Falls back gracefully if LLM dependencies or API key are unavailable.
     """
     project_name = state.get("project_name", "unknown")
@@ -170,20 +440,46 @@ def reviewer_node(state: PipelineState) -> dict:
     build_results = state.get("build_results", [])
     verify_record = state.get("verify_record")
     design_spec_data = state.get("design_spec") or {}
+    changed_files = state.get("changed_files") or []
+    is_lightweight = state.get("path") == "lightweight"
 
     # Determine if we can use LLM
     use_llm = _HAS_LLM_DEPS and has_any_llm_key()
 
+    # Determine if we should chunk the review
+    do_chunk = _should_chunk(changed_files)
+    chunks = chunk_diff_by_module(changed_files) if do_chunk else []
+
+    if do_chunk:
+        total_files = len(changed_files)
+        total_lines = sum(f.get("lines_changed", 1) for f in changed_files)
+        print(f"  [Review] Auto-chunking enabled: {total_files} files, {total_lines} lines "
+              f"across {len(chunks)} modules "
+              f"(thresholds: files>{_CHUNK_FILES_THRESHOLD}, lines>{_CHUNK_LINES_THRESHOLD})")
+        for c in chunks:
+            print(f"    Module '{c['module']}': {c['file_count']} files, {c['lines_changed']} lines")
+
     if use_llm:
         try:
-            print("  [Review] Calling LLM for code review...")
-            result, provider, call_cost = _call_llm(
-                design_spec=str(design_spec_data),
-                build_results=str(build_results),
-                verify_record=str(verify_record),
-                is_lightweight=(state.get("path") == "lightweight"),
-            )
-            print(f"  [Review] Verdict (provider: {provider}, cost: ${call_cost:.4f}): {result.verdict}")
+            if do_chunk:
+                print("  [Review] Dispatching chunked LLM reviews...")
+                result, call_cost = _review_chunked_llm(
+                    chunks=chunks,
+                    design_spec=str(design_spec_data),
+                    build_results=str(build_results),
+                    verify_record=str(verify_record),
+                    is_lightweight=is_lightweight,
+                )
+            else:
+                print("  [Review] Calling LLM for code review...")
+                result, provider, call_cost = _call_llm(
+                    design_spec=str(design_spec_data),
+                    build_results=str(build_results),
+                    verify_record=str(verify_record),
+                    is_lightweight=is_lightweight,
+                )
+
+            print(f"  [Review] Verdict: {result.verdict} (cost: ${call_cost:.4f})")
             print(f"    Critical: {len(result.critical_issues)}")
             print(f"    Important: {len(result.important_issues)}")
             print(f"    Minor: {len(result.minor_issues)}")
@@ -204,7 +500,10 @@ def reviewer_node(state: PipelineState) -> dict:
         print(f"  [Review] LLM unavailable ({reason}), using fallback reviewer.")
 
     # Fallback path
-    result = _review_fallback(build_results, verify_record, is_lightweight=(state.get("path") == "lightweight"))
+    if do_chunk:
+        result = _review_chunked_fallback(chunks, build_results, verify_record, is_lightweight=is_lightweight)
+    else:
+        result = _review_fallback(build_results, verify_record, is_lightweight=is_lightweight)
     print(f"  [Review] Verdict (fallback): {result.verdict}")
 
     return {

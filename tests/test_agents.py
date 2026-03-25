@@ -39,6 +39,7 @@ def _make_state(**overrides) -> dict:
         "review_result": None,
         "ship_result": None,
         "evolve_report": None,
+        "changed_files": None,
         "attempt_counts": {},
         "human_approvals": {},
         "cost_total_usd": 0.0,
@@ -356,10 +357,11 @@ class TestSetupNode:
 class TestBuilderNode:
     """builder_node falls back to placeholder builds without LLM."""
 
-    def test_fallback_builds_all_tasks(self):
+    def test_fallback_builds_all_tasks(self, tmp_path):
         from pineapple.agents.builder import builder_node
 
         state = _make_state(
+            target_dir=str(tmp_path),
             task_plan={
                 "tasks": [
                     {"id": "T1", "description": "Do task 1", "complexity": "trivial", "estimated_cost_usd": 0.01},
@@ -376,10 +378,11 @@ class TestBuilderNode:
         assert len(result["build_results"]) == 2
         assert all(r["status"] == "completed" for r in result["build_results"])
 
-    def test_lightweight_path_auto_generates_task(self):
+    def test_lightweight_path_auto_generates_task(self, tmp_path):
         from pineapple.agents.builder import builder_node
 
         state = _make_state(
+            target_dir=str(tmp_path),
             task_plan=None,
             request="Fix the typo in README",
             path="lightweight",
@@ -391,10 +394,11 @@ class TestBuilderNode:
         assert result["current_stage"] == "build"
         assert len(result["build_results"]) == 1
 
-    def test_increments_attempt_count(self):
+    def test_increments_attempt_count(self, tmp_path):
         from pineapple.agents.builder import builder_node
 
         state = _make_state(
+            target_dir=str(tmp_path),
             task_plan={
                 "tasks": [{"id": "T1", "description": "test", "complexity": "trivial", "estimated_cost_usd": 0.0}],
                 "total_estimated_cost_usd": 0.0,
@@ -407,16 +411,46 @@ class TestBuilderNode:
 
         assert result["attempt_counts"]["build"] == 2
 
-    def test_output_has_expected_keys(self):
+    def test_output_has_expected_keys(self, tmp_path):
         from pineapple.agents.builder import builder_node
 
-        state = _make_state(task_plan=None)
+        state = _make_state(target_dir=str(tmp_path), task_plan=None)
         with patch("pineapple.agents.builder._HAS_LLM_DEPS", False):
             result = builder_node(state)
 
         assert "current_stage" in result
         assert "build_results" in result
         assert "attempt_counts" in result
+
+    def test_raises_when_no_workspace_and_no_target_dir(self):
+        """Builder must NOT fall back to CWD -- should raise RuntimeError."""
+        from pineapple.agents.builder import builder_node
+
+        state = _make_state(
+            workspace_info={"worktree_path": None},
+            target_dir="",
+            task_plan=None,
+        )
+
+        with patch("pineapple.agents.builder._HAS_LLM_DEPS", False):
+            with pytest.raises(RuntimeError, match="no workspace"):
+                builder_node(state)
+
+    def test_raises_when_workspace_is_pipeline_repo(self, tmp_path):
+        """Builder must refuse to write into the pipeline's own repo."""
+        from pineapple.agents.builder import builder_node
+
+        # Point workspace to the pipeline repo root (parent of src/)
+        pipeline_root = str(Path(__file__).resolve().parents[1])
+
+        state = _make_state(
+            workspace_info={"worktree_path": pipeline_root},
+            task_plan=None,
+        )
+
+        with patch("pineapple.agents.builder._HAS_LLM_DEPS", False):
+            with pytest.raises(RuntimeError, match="pipeline repo"):
+                builder_node(state)
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +579,233 @@ class TestReviewerNode:
         assert "critical_issues" in rr
         assert "important_issues" in rr
         assert "minor_issues" in rr
+
+
+# ---------------------------------------------------------------------------
+# Stage 7b: Chunked Reviewer
+# ---------------------------------------------------------------------------
+
+
+class TestChunkDiffByModule:
+    """Unit tests for chunk_diff_by_module helper."""
+
+    def test_groups_by_top_level_directory(self):
+        from pineapple.agents.reviewer import chunk_diff_by_module
+
+        files = [
+            {"path": "kfs_core/engine.py", "lines_changed": 100},
+            {"path": "kfs_core/utils.py", "lines_changed": 50},
+            {"path": "kfs_cli/main.py", "lines_changed": 30},
+            {"path": "tests/test_engine.py", "lines_changed": 80},
+        ]
+        chunks = chunk_diff_by_module(files)
+        modules = [c["module"] for c in chunks]
+        assert "kfs_core" in modules
+        assert "kfs_cli" in modules
+        assert "tests" in modules
+
+    def test_root_files_grouped_as_root(self):
+        from pineapple.agents.reviewer import chunk_diff_by_module
+
+        files = [
+            {"path": "README.md", "lines_changed": 5},
+            {"path": "setup.py", "lines_changed": 10},
+            {"path": "src/main.py", "lines_changed": 20},
+        ]
+        chunks = chunk_diff_by_module(files)
+        modules = [c["module"] for c in chunks]
+        assert "_root" in modules
+        assert "src" in modules
+
+    def test_empty_input_returns_empty(self):
+        from pineapple.agents.reviewer import chunk_diff_by_module
+
+        assert chunk_diff_by_module([]) == []
+
+    def test_file_count_and_lines_totaled(self):
+        from pineapple.agents.reviewer import chunk_diff_by_module
+
+        files = [
+            {"path": "mod/a.py", "lines_changed": 10},
+            {"path": "mod/b.py", "lines_changed": 20},
+            {"path": "mod/c.py", "lines_changed": 30},
+        ]
+        chunks = chunk_diff_by_module(files)
+        assert len(chunks) == 1
+        assert chunks[0]["file_count"] == 3
+        assert chunks[0]["lines_changed"] == 60
+
+    def test_defaults_lines_changed_to_1(self):
+        from pineapple.agents.reviewer import chunk_diff_by_module
+
+        files = [{"path": "mod/a.py"}, {"path": "mod/b.py"}]
+        chunks = chunk_diff_by_module(files)
+        assert chunks[0]["lines_changed"] == 2
+
+    def test_backslash_paths_normalized(self):
+        from pineapple.agents.reviewer import chunk_diff_by_module
+
+        files = [{"path": "src\\pineapple\\agents\\reviewer.py", "lines_changed": 50}]
+        chunks = chunk_diff_by_module(files)
+        assert chunks[0]["module"] == "src"
+
+
+class TestShouldChunk:
+    """Tests for _should_chunk threshold logic."""
+
+    def test_below_thresholds_no_chunk(self):
+        from pineapple.agents.reviewer import _should_chunk
+
+        files = [{"path": f"mod/file{i}.py", "lines_changed": 10} for i in range(10)]
+        assert _should_chunk(files) is False
+
+    def test_above_file_threshold_triggers_chunk(self):
+        from pineapple.agents.reviewer import _should_chunk
+
+        files = [{"path": f"mod/file{i}.py", "lines_changed": 1} for i in range(51)]
+        assert _should_chunk(files) is True
+
+    def test_above_line_threshold_triggers_chunk(self):
+        from pineapple.agents.reviewer import _should_chunk
+
+        files = [{"path": f"mod/file{i}.py", "lines_changed": 1000} for i in range(10)]
+        assert _should_chunk(files) is True
+
+    def test_empty_files_no_chunk(self):
+        from pineapple.agents.reviewer import _should_chunk
+
+        assert _should_chunk([]) is False
+
+
+class TestMergeChunkResults:
+    """Tests for _merge_chunk_results merging logic."""
+
+    def test_worst_verdict_wins(self):
+        from pineapple.agents.reviewer import _merge_chunk_results
+
+        chunk_results = [
+            {"module": "mod_a", "result": {"verdict": "pass", "critical_issues": [], "important_issues": [], "minor_issues": []}},
+            {"module": "mod_b", "result": {"verdict": "retry", "critical_issues": [], "important_issues": ["issue"], "minor_issues": []}},
+            {"module": "mod_c", "result": {"verdict": "pass", "critical_issues": [], "important_issues": [], "minor_issues": []}},
+        ]
+        merged = _merge_chunk_results(chunk_results)
+        assert merged.verdict == "retry"
+
+    def test_fail_overrides_retry(self):
+        from pineapple.agents.reviewer import _merge_chunk_results
+
+        chunk_results = [
+            {"module": "mod_a", "result": {"verdict": "retry", "critical_issues": [], "important_issues": [], "minor_issues": []}},
+            {"module": "mod_b", "result": {"verdict": "fail", "critical_issues": ["fatal"], "important_issues": [], "minor_issues": []}},
+        ]
+        merged = _merge_chunk_results(chunk_results)
+        assert merged.verdict == "fail"
+        assert "fatal" in merged.critical_issues
+
+    def test_issues_concatenated_and_deduplicated(self):
+        from pineapple.agents.reviewer import _merge_chunk_results
+
+        chunk_results = [
+            {"module": "a", "result": {"verdict": "pass", "critical_issues": [], "important_issues": ["dup"], "minor_issues": ["x"]}},
+            {"module": "b", "result": {"verdict": "pass", "critical_issues": [], "important_issues": ["dup"], "minor_issues": ["y"]}},
+        ]
+        merged = _merge_chunk_results(chunk_results)
+        assert merged.important_issues == ["dup"]
+        assert set(merged.minor_issues) == {"x", "y"}
+
+    def test_all_pass_gives_pass(self):
+        from pineapple.agents.reviewer import _merge_chunk_results
+
+        chunk_results = [
+            {"module": "a", "result": {"verdict": "pass", "critical_issues": [], "important_issues": [], "minor_issues": []}},
+            {"module": "b", "result": {"verdict": "pass", "critical_issues": [], "important_issues": [], "minor_issues": []}},
+        ]
+        merged = _merge_chunk_results(chunk_results)
+        assert merged.verdict == "pass"
+
+
+class TestChunkedReviewerNode:
+    """Integration tests: reviewer_node with chunked fallback path."""
+
+    def _make_large_changed_files(self, n_modules=5, files_per_module=15):
+        """Generate a list of changed files exceeding chunk thresholds."""
+        files = []
+        modules = [f"module_{i}" for i in range(n_modules)]
+        for mod in modules:
+            for j in range(files_per_module):
+                files.append({"path": f"{mod}/file_{j}.py", "lines_changed": 100})
+        return files
+
+    def test_chunked_fallback_pass(self):
+        from pineapple.agents.reviewer import reviewer_node
+
+        changed = self._make_large_changed_files(n_modules=4, files_per_module=15)
+        state = _make_state(
+            build_results=[
+                {"task_id": "T1", "status": "completed", "commits": ["abc"], "errors": []},
+            ],
+            verify_record={"all_green": True, "layers": []},
+            changed_files=changed,
+        )
+
+        with patch("pineapple.agents.reviewer._HAS_LLM_DEPS", False):
+            result = reviewer_node(state)
+
+        assert result["current_stage"] == "review"
+        assert result["review_result"]["verdict"] == "pass"
+
+    def test_chunked_fallback_retry_on_failed_build(self):
+        from pineapple.agents.reviewer import reviewer_node
+
+        changed = self._make_large_changed_files(n_modules=4, files_per_module=15)
+        state = _make_state(
+            build_results=[
+                {"task_id": "T1", "status": "failed", "commits": [], "errors": ["compile error"]},
+            ],
+            verify_record={"all_green": False, "layers": []},
+            changed_files=changed,
+        )
+
+        with patch("pineapple.agents.reviewer._HAS_LLM_DEPS", False):
+            result = reviewer_node(state)
+
+        assert result["review_result"]["verdict"] == "retry"
+        # Should have module-tagged critical issues
+        critical = result["review_result"]["critical_issues"]
+        assert any("[module_" in issue for issue in critical)
+
+    def test_no_chunking_below_threshold(self):
+        from pineapple.agents.reviewer import reviewer_node
+
+        # Only 5 files, well below threshold
+        changed = [{"path": f"src/file_{i}.py", "lines_changed": 10} for i in range(5)]
+        state = _make_state(
+            build_results=[
+                {"task_id": "T1", "status": "completed", "commits": ["abc"], "errors": []},
+            ],
+            verify_record={"all_green": True, "layers": []},
+            changed_files=changed,
+        )
+
+        with patch("pineapple.agents.reviewer._HAS_LLM_DEPS", False):
+            result = reviewer_node(state)
+
+        assert result["review_result"]["verdict"] == "pass"
+
+    def test_no_changed_files_skips_chunking(self):
+        from pineapple.agents.reviewer import reviewer_node
+
+        state = _make_state(
+            build_results=[],
+            verify_record=None,
+            changed_files=None,
+        )
+
+        with patch("pineapple.agents.reviewer._HAS_LLM_DEPS", False):
+            result = reviewer_node(state)
+
+        # Should still work, just no chunking
+        assert result["current_stage"] == "review"
 
 
 # ---------------------------------------------------------------------------
@@ -933,6 +1194,31 @@ class TestWorkspaceFlow:
         # but we can verify it doesn't crash and reads the right branch
         result = _do_pr(state)
         assert result.action == "keep"  # expected fallback in test env
+
+    def test_setup_propagates_target_dir_in_workspace_info(self, tmp_path):
+        """workspace_info must include target_dir so builder can fall back to it."""
+        from pineapple.agents.setup import setup_node
+
+        target_repo = tmp_path / "target"
+        target_repo.mkdir()
+        _init_git_repo(target_repo)
+
+        state = _make_state(
+            target_dir=str(target_repo),
+            run_id="ws-test-prop",
+            project_name="propagation-test",
+        )
+
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            result = setup_node(state)
+        finally:
+            os.chdir(old_cwd)
+
+        ws_info = result["workspace_info"]
+        assert "target_dir" in ws_info, "workspace_info must propagate target_dir"
+        assert str(target_repo) in ws_info["target_dir"]
 
     def test_run_dir_created_in_target_dir(self, tmp_path):
         """When target_dir is set, run_dir should be under target_dir."""

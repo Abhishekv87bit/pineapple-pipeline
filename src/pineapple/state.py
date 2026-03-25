@@ -47,6 +47,11 @@ class PipelineState(TypedDict):
     ship_result: dict | None
     evolve_report: dict | None
 
+    # Optional: list of changed files for chunked review.
+    # Each entry is a dict with at least "path" (str) and optionally
+    # "lines_changed" (int).  Populated by build or verify stages.
+    changed_files: list[dict] | None
+
     # Control flow
     attempt_counts: dict[str, int]
     human_approvals: dict[str, bool]

@@ -100,8 +100,11 @@ DesignSpec with:
 - **summary**: 2-3 paragraph summary covering: the recommended approach, \
 why it was chosen over alternatives, and key architectural decisions
 - **components**: Break the system into 3-8 ComponentSpec items
-- **technology_choices**: A dictionary mapping category to choice \
-(e.g., {{"language": "Python 3.12", "framework": "FastAPI", "database": "PostgreSQL"}})
+- **technology_choices_list**: A list of TechnologyChoice items, each with a \
+"category" (e.g., "language", "framework", "database", "infrastructure", \
+"testing") and a "choice" (e.g., "Python 3.12", "FastAPI", "PostgreSQL"). \
+Include at least 3-5 technology choices covering language, framework, and \
+key libraries.
 - **approved**: Always set to false (human approves at the gate)"""
 
 
@@ -178,7 +181,7 @@ def _make_error_spec(error: str) -> DesignSpec:
         title=f"Error generating architecture: {error}",
         summary="Architecture stage failed.",
         components=[],
-        technology_choices={},
+        technology_choices_list=[],
         approved=False,
     )
 
