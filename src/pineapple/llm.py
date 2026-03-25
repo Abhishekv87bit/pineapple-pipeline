@@ -163,7 +163,7 @@ def _make_gemini_client() -> instructor.Instructor:
         raise ValueError("Gemini API key not found (GOOGLE_API_KEY / GEMINI_API_KEY)")
 
     raw_client = genai.Client(api_key=api_key)
-    return instructor.from_genai(raw_client)
+    return instructor.from_genai(raw_client, mode=instructor.Mode.GENAI_STRUCTURED_OUTPUTS)
 
 
 def _make_claude_client() -> instructor.Instructor:

@@ -87,8 +87,8 @@ class TaskPlan(BaseModel):
 class FileWrite(BaseModel):
     """A file to be written to disk during Build."""
 
-    path: str
-    content: str
+    path: str = Field(description="Relative file path from project root (e.g., 'src/module.py')")
+    content: str = Field(description="Complete source code for this file. Must be full, runnable implementation — not a stub, not a description, not a single import line.")
 
 
 class BuildResult(BaseModel):
