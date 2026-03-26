@@ -18,7 +18,7 @@ from typing import Any
 _logger = logging.getLogger(__name__)
 
 # Max conversation turns before giving up
-MAX_TURNS = int(os.environ.get("PINEAPPLE_AGENT_MAX_TURNS", "15"))
+MAX_TURNS = int(os.environ.get("PINEAPPLE_AGENT_MAX_TURNS", "25"))
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ def _exec_read_file(workspace: str, path: str) -> str:
         return f"ERROR: {exc}"
 
 
-def _exec_write_file(workspace: str, path: str, content: str) -> str:
+def _exec_write_file(workspace: str, path: str, content: str, allowed_paths: set[str] | None = None) -> str:
     """Write a file to the workspace."""
     filepath = Path(workspace) / path
     # Security: prevent path traversal
@@ -136,9 +136,23 @@ def _exec_write_file(workspace: str, path: str, content: str) -> str:
     try:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content, encoding="utf-8")
-        return f"OK: Wrote {len(content)} chars to {path}"
+        result = f"OK: Wrote {len(content)} chars to {path}"
     except OSError as exc:
         return f"ERROR: {exc}"
+
+    # Soft warning if path is outside the architecture spec
+    rel_path = path.replace("\\", "/")
+    if allowed_paths and rel_path not in allowed_paths:
+        # Check if it's a common scaffolding file we should allow
+        basename = os.path.basename(rel_path)
+        if basename not in ("__init__.py", "conftest.py", "pytest.ini", ".env"):
+            if not rel_path.startswith("tests/"):
+                return (
+                    f"WARNING: File written but path '{rel_path}' is NOT in the architecture spec. "
+                    f"Expected paths: {sorted(list(allowed_paths))[:10]}. "
+                    "Consider moving this file to the correct architecture path."
+                )
+    return result
 
 
 def _exec_run_command(workspace: str, command: str) -> str:
@@ -184,12 +198,12 @@ def _exec_list_files(workspace: str, path: str) -> str:
         return f"ERROR: {exc}"
 
 
-def _execute_tool(workspace: str, tool_name: str, args: dict) -> str:
+def _execute_tool(workspace: str, tool_name: str, args: dict, allowed_paths: set[str] | None = None) -> str:
     """Dispatch a tool call to the appropriate executor."""
     if tool_name == "read_file":
         return _exec_read_file(workspace, args.get("path", ""))
     elif tool_name == "write_file":
-        return _exec_write_file(workspace, args.get("path", ""), args.get("content", ""))
+        return _exec_write_file(workspace, args.get("path", ""), args.get("content", ""), allowed_paths)
     elif tool_name == "run_command":
         return _exec_run_command(workspace, args.get("command", ""))
     elif tool_name == "list_files":
@@ -213,6 +227,8 @@ def run_agent_task(
     files_to_modify: list[str] | None = None,
     max_turns: int | None = None,
     architecture_context: str = "",
+    allowed_paths: set[str] | None = None,
+    workspace_manifest: str = "",
 ) -> tuple[list[dict], float, str]:
     """Run a Gemini agent conversation for a single build task.
 
@@ -230,6 +246,10 @@ def run_agent_task(
         architecture_context: Excerpt from the architecture document relevant to
             this task.  When provided, injected into the agent system message as
             a binding contract for file paths, class names, and imports.
+        allowed_paths: Set of relative paths the agent is expected to write.
+            Files written outside this set get a soft WARNING (not blocked).
+        workspace_manifest: Pre-built listing of workspace files. When provided,
+            replaces the default "list existing files" instruction.
 
     Returns:
         Tuple of (files_written_dicts, cost_usd, summary).
@@ -278,16 +298,28 @@ def run_agent_task(
         )
 
     # Build the initial user message
-    user_msg = f"## Task\n{task_description}\n\n"
-    if files_to_create:
-        user_msg += f"## Files to create\n{', '.join(files_to_create)}\n\n"
-    if files_to_modify:
-        user_msg += f"## Files to modify\n{', '.join(files_to_modify)}\n\n"
-    if design_summary:
-        user_msg += f"## Design context\n{design_summary}\n\n"
-    if prior_context:
-        user_msg += f"## Additional context\n{prior_context}\n\n"
-    user_msg += "Start by listing existing files to understand the workspace, then implement the task."
+    if workspace_manifest:
+        user_msg = f"## Workspace Map\n{workspace_manifest}\n\n## Task\n{task_description}\n\n"
+        if files_to_create:
+            user_msg += f"## Files to create\n{', '.join(files_to_create)}\n\n"
+        if files_to_modify:
+            user_msg += f"## Files to modify\n{', '.join(files_to_modify)}\n\n"
+        if design_summary:
+            user_msg += f"## Design context\n{design_summary}\n\n"
+        if prior_context:
+            user_msg += f"## Additional context\n{prior_context}\n\n"
+        user_msg += "Use the workspace map above to know what files exist and where to write. Do NOT call list_files('.') — the map already shows you everything."
+    else:
+        user_msg = f"## Task\n{task_description}\n\n"
+        if files_to_create:
+            user_msg += f"## Files to create\n{', '.join(files_to_create)}\n\n"
+        if files_to_modify:
+            user_msg += f"## Files to modify\n{', '.join(files_to_modify)}\n\n"
+        if design_summary:
+            user_msg += f"## Design context\n{design_summary}\n\n"
+        if prior_context:
+            user_msg += f"## Additional context\n{prior_context}\n\n"
+        user_msg += "Start by listing existing files to understand the workspace, then implement the task."
 
     # Convert our tool definitions to Gemini format
     gemini_tools = types.Tool(function_declarations=[
@@ -347,7 +379,7 @@ def run_agent_task(
                 print(f"      [Agent] Turn {turn+1}: {tool_name}({', '.join(f'{k}={repr(v)[:50]}' for k,v in tool_args.items())})")
 
                 # Execute the tool
-                result = _execute_tool(workspace, tool_name, tool_args)
+                result = _execute_tool(workspace, tool_name, tool_args, allowed_paths)
 
                 # Track written files
                 if tool_name == "write_file" and result.startswith("OK"):

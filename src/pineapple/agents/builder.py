@@ -6,6 +6,7 @@ Install dependencies with: pip install 'pineapple-pipeline[llm]'
 """
 import os
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -30,6 +31,7 @@ except ImportError as exc:
 # ---------------------------------------------------------------------------
 
 _MAX_TOKENS = 8192
+_MAX_CONCURRENT = int(os.environ.get("PINEAPPLE_MAX_CONCURRENT", "4"))
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -622,13 +624,52 @@ def builder_node(state: PipelineState) -> dict:
     else:
         print(f"  [Build] Mode: single-shot")
 
+    build_results = []  # type: list[dict]
+    total_cost = 0.0
+
     # Check if architecture-aware orchestration is available
     raw_architecture = design_spec_data.get("_raw_document", "")
+    _MAX_CONCURRENT = int(os.environ.get("PINEAPPLE_MAX_CONCURRENT", "4"))
     if raw_architecture and builder_mode == "agent":
         try:
-            from pineapple.orchestrator import orchestrate_build
-            print("  [Build] Architecture document found — delegating to orchestrator")
-            return orchestrate_build(state, workspace, manifest_path=state.get("_manifest_path"))
+            from pineapple.orchestrator import run_phased_build
+            print("  [Build] Architecture document found — delegating to phased orchestrator")
+            phased_results, phased_cost = run_phased_build(
+                tasks=[t for t in task_plan.tasks],  # Task objects
+                workspace=workspace,
+                design_spec=design_spec_data,
+                state=state,
+                build_fn=_build_one_task,
+                process_fn=_process_build_result,
+                max_concurrent=_MAX_CONCURRENT,
+            )
+            build_results.extend([
+                r.model_dump() if hasattr(r, "model_dump") else r
+                for r in phased_results
+            ])
+            total_cost += phased_cost
+
+            # Flush LangFuse traces before returning
+            if _HAS_LLM_DEPS:
+                try:
+                    flush_traces()
+                except Exception:
+                    pass
+
+            # Increment build attempt count for observability
+            attempt_counts = dict(state.get("attempt_counts", {}))
+            attempt_counts["build"] = attempt_counts.get("build", 0) + 1
+
+            completed = sum(1 for r in build_results if r.get("status") == "completed")
+            failed = sum(1 for r in build_results if r.get("status") == "failed")
+            print(f"  [Build] Done (phased): {completed} completed, {failed} failed out of {len(build_results)} tasks")
+
+            return {
+                "current_stage": "build",
+                "build_results": build_results,
+                "cost_total_usd": state.get("cost_total_usd", 0.0) + total_cost,
+                "attempt_counts": attempt_counts,
+            }
         except ImportError:
             print("  [Build] Orchestrator not available, falling back to flat execution")
 
@@ -645,7 +686,6 @@ def builder_node(state: PipelineState) -> dict:
         provider = llm.provider
         print(f"  [Build] Using provider: {provider}")
 
-    build_results = []  # type: list[dict]
     total_cost = 0.0
     total_files_written = 0
     cumulative_files = []  # type: list[FileWrite]  # tracks files written across tasks
@@ -654,15 +694,25 @@ def builder_node(state: PipelineState) -> dict:
     # On retry: seed run_files from previous build results so we can overwrite
     # files that were written in earlier passes (fixes the stuck retry loop).
     attempt_counts = state.get("attempt_counts", {})
-    if attempt_counts.get("build", 0) > 0:
-        previous_results = state.get("build_results", [])
+    previous_results = state.get("build_results", [])
+
+    attempt_count = attempt_counts.get("build", 0)
+    if attempt_count > 0 and previous_results:
+        completed_ids = {r["task_id"] for r in previous_results if r.get("status") == "completed"}
+        original_count = len(task_plan.tasks)
+        task_plan.tasks = [t for t in task_plan.tasks if t.id not in completed_ids]
+        # Carry forward completed results
+        build_results = [r for r in previous_results if r.get("status") == "completed"]
+        print(f"  [Build] Retry: {len(completed_ids)} tasks already completed, re-running {len(task_plan.tasks)} of {original_count}")
         for prev in previous_results:
             for fw in prev.get("files_written", []):
                 path = fw.get("path", "") if isinstance(fw, dict) else getattr(fw, "path", "")
                 if path:
                     run_files.add(path)
         if run_files:
-            print(f"  [Build] Retry attempt {attempt_counts['build'] + 1}: {len(run_files)} files from previous pass marked for overwrite")
+            print(f"  [Build] Retry attempt {attempt_count + 1}: {len(run_files)} files from previous pass marked for overwrite")
+    else:
+        build_results = []  # type: list[dict]
 
     # On retry: extract reviewer/verifier results for per-task feedback injection
     review_result: dict = {}
@@ -702,10 +752,16 @@ def builder_node(state: PipelineState) -> dict:
             max_workers = min(len(batch), 3)  # Cap at 3 concurrent
             futures = {}
 
+            _semaphore = threading.Semaphore(_MAX_CONCURRENT)
+
+            def _rate_limited_build(task, *args, **kwargs):
+                with _semaphore:
+                    return _build_one_task(task, *args, **kwargs)
+
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 for task in batch:
                     future = executor.submit(
-                        _build_one_task,
+                        _rate_limited_build,
                         task, workspace, design_summary, cumulative_files,
                         review_result, verify_record, run_files, workspace_info,
                         use_llm, llm, builder_mode,

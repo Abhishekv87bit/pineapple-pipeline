@@ -17,9 +17,11 @@ Intelligence -> Interface -> Verification). The orchestrator:
 from __future__ import annotations
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 # ---------------------------------------------------------------------------
@@ -625,74 +627,203 @@ def _read_existing_files(workspace: str, tasks: list[dict]) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Workspace manifest (structured context for agents)
 # ---------------------------------------------------------------------------
 
 
-def orchestrate_build(
-    state: dict,
-    workspace: str,
-    manifest_path: str | None = None,
-) -> dict:
-    """Main entry point. Called by builder_node when architecture is available.
+def build_workspace_manifest(
+    task: dict,
+    design_spec: dict,
+    existing_files: list[str],
+    prior_phase_files: dict[str, str],
+) -> str:
+    """Generate structured workspace awareness text for an agent.
 
-    Execution flow:
-    1. Extract phases from architecture
-    2. Map tasks to phases
-    3. For each phase:
-       a. Build per-task context (architecture + prior phase code + existing code)
-       b. Yield phase tasks with enriched context for the builder to execute
-       c. Collect output files from disk
-       d. Validate against architecture contract
-       e. Report violations but continue (do not block)
-    4. Return aggregated results
+    Instead of the agent blindly calling list_files('.'), this tells it:
+    - What directories exist
+    - Which files THIS task should CREATE (from architecture)
+    - Which files THIS task should MODIFY (from architecture)
+    - Key imports available from prior phases
+    - Test file locations
 
     Parameters
     ----------
-    state:
-        The full PipelineState dict.
-    workspace:
-        Root directory of the target project (resolved, safe).
-    manifest_path:
-        Optional path to MANIFEST.yaml for status updates.
+    task:
+        The task dict being built.
+    design_spec:
+        Full architecture design spec dict.
+    existing_files:
+        List of relative file paths already on disk.
+    prior_phase_files:
+        ``{path: content}`` from prior completed phases.
 
     Returns
     -------
-    dict
-        Keys:
-        - ``phases``: list of phase result dicts, each with tasks, violations,
-          files_written
-        - ``total_violations``: int count of all violations
-        - ``phase_count``: number of phases executed
-        - ``task_phases``: list[list[dict]] -- tasks grouped by phase, each task
-          enriched with ``_orchestrator_context`` for the builder
+    str
+        Structured workspace description block.
     """
+    parts: list[str] = []
+
+    # 1. Directory tree from existing files
+    dirs: set[str] = set()
+    for fpath in existing_files:
+        parent = str(Path(fpath).parent)
+        while parent and parent != ".":
+            dirs.add(parent)
+            parent = str(Path(parent).parent)
+    for fpath in prior_phase_files:
+        parent = str(Path(fpath).parent)
+        while parent and parent != ".":
+            dirs.add(parent)
+            parent = str(Path(parent).parent)
+
+    if dirs:
+        parts.append("=== WORKSPACE DIRECTORIES ===")
+        for d in sorted(dirs):
+            parts.append(f"  {d}/")
+        parts.append("")
+
+    # 2. Files this task should CREATE
+    files_to_create = task.get("files_to_create", []) or []
+    if files_to_create:
+        parts.append("=== FILES TO CREATE (this task) ===")
+        for fpath in files_to_create:
+            parts.append(f"  CREATE: {fpath}")
+        parts.append("")
+
+    # 3. Files this task should MODIFY
+    files_to_modify = task.get("files_to_modify", []) or []
+    if files_to_modify:
+        parts.append("=== FILES TO MODIFY (this task) ===")
+        for fpath in files_to_modify:
+            exists = fpath in existing_files or fpath in prior_phase_files
+            status = "exists" if exists else "NOT YET ON DISK"
+            parts.append(f"  MODIFY: {fpath} ({status})")
+        parts.append("")
+
+    # 4. Key imports from prior phases
+    if prior_phase_files:
+        parts.append("=== AVAILABLE FROM PRIOR PHASES ===")
+        for fpath, content in prior_phase_files.items():
+            if not fpath.endswith(".py"):
+                parts.append(f"  {fpath}")
+                continue
+            # Extract top-level class and function names for import hints
+            imports: list[str] = []
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("class ") and "(" in stripped:
+                    name = stripped.split("class ")[1].split("(")[0].strip()
+                    imports.append(name)
+                elif stripped.startswith("def ") and "(" in stripped:
+                    name = stripped.split("def ")[1].split("(")[0].strip()
+                    if not name.startswith("_"):
+                        imports.append(name)
+            if imports:
+                parts.append(f"  {fpath}  ->  exports: {', '.join(imports[:10])}")
+            else:
+                parts.append(f"  {fpath}")
+        parts.append("")
+
+    # 5. Test file locations from architecture
+    components = design_spec.get("components", [])
+    test_files: list[str] = []
+    for comp in components:
+        for f in comp.get("files", []):
+            if "test" in f.lower() or f.startswith("tests/"):
+                test_files.append(f)
+    if test_files:
+        parts.append("=== TEST FILES (from architecture) ===")
+        for tf in test_files:
+            parts.append(f"  {tf}")
+        parts.append("")
+
+    if not parts:
+        return ""
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point: run_phased_build
+# ---------------------------------------------------------------------------
+
+
+def run_phased_build(
+    tasks: list,
+    workspace: str,
+    design_spec: dict,
+    state: dict,
+    build_fn: Callable,
+    process_fn: Callable,
+    max_concurrent: int = 4,
+) -> tuple[list[dict], float]:
+    """Run tasks in dependency phases. Returns (build_results, total_cost).
+
+    This is the functional, callback-based orchestrator that integrates with
+    builder_node. Instead of trying to build code itself, it delegates to
+    the provided ``build_fn`` and ``process_fn`` callbacks.
+
+    Flow:
+    1. Extract phases from architecture
+    2. Map tasks to phases
+    3. For each phase sequentially:
+       a. Enrich each task with context (architecture spec + prior phase code + existing files)
+       b. Execute phase tasks (parallel within phase, limited by semaphore)
+       c. Process results (write files, commit) via process_fn
+       d. Collect output files from disk
+       e. Validate against architecture
+       f. Print phase summary
+    4. Return all build results + total cost
+
+    Parameters
+    ----------
+    tasks:
+        List of Task objects from TaskPlan.
+    workspace:
+        Path to the project worktree.
+    design_spec:
+        Architecture design spec dict (includes ``_raw_document``).
+    state:
+        Full pipeline state dict (for extracting retry feedback, workspace_info, etc).
+    build_fn:
+        ``_build_one_task(task, workspace, design_summary, cumulative_files,
+        review_result, verify_record, run_files, workspace_info, use_llm, llm,
+        builder_mode, design_spec)`` -- returns ``(BuildResult, cost)``.
+    process_fn:
+        ``_process_build_result(result, workspace, run_files, cumulative_files,
+        workspace_info)`` -- writes files to disk, commits, returns file count.
+    max_concurrent:
+        Max parallel tasks within a single phase.
+
+    Returns
+    -------
+    tuple[list[dict], float]
+        ``(build_results, total_cost)`` where build_results are
+        BuildResult-compatible dicts.
+    """
+    from pineapple.models import FileWrite  # local import to avoid circular
+
     print("[Orchestrator] Starting phase-based build orchestration")
 
-    design_spec = state.get("design_spec") or {}
-    task_plan_data = state.get("task_plan") or {}
-    raw_tasks = task_plan_data.get("tasks", [])
-
-    # Normalize tasks to dicts if they're Pydantic models
-    tasks: list[dict] = []
-    for t in raw_tasks:
-        if isinstance(t, dict):
-            tasks.append(t)
-        elif hasattr(t, "model_dump"):
-            tasks.append(t.model_dump())
+    # Normalize tasks to dicts for phase mapping, keep originals for build_fn
+    task_dicts: list[dict] = []
+    task_by_id: dict[str, Any] = {}
+    for t in tasks:
+        if hasattr(t, "model_dump"):
+            td = t.model_dump()
+        elif isinstance(t, dict):
+            td = t
         else:
-            tasks.append(dict(t))
+            td = dict(t)
+        task_dicts.append(td)
+        task_by_id[td.get("id", "")] = t  # original Task object
 
-    if not tasks:
+    if not task_dicts:
         print("[Orchestrator] No tasks found, nothing to orchestrate")
-        return {
-            "phases": [],
-            "total_violations": 0,
-            "phase_count": 0,
-            "task_phases": [],
-        }
+        return [], 0.0
 
-    # Step 1: Extract phases from architecture
+    # --- Step 1: Extract phases from architecture ---
     phases = extract_phases_from_architecture(design_spec)
     if not phases:
         print("[Orchestrator] No phase info in architecture, using single-phase fallback")
@@ -702,68 +833,179 @@ def orchestrate_build(
     for i, phase_ids in enumerate(phases):
         print(f"  Phase {i + 1}: {', '.join(phase_ids)}")
 
-    # Step 2: Map tasks to phases
-    phased_tasks = map_tasks_to_phases(tasks, phases)
+    # --- Step 2: Map tasks to phases ---
+    phased_task_dicts = map_tasks_to_phases(task_dicts, phases)
 
-    for i, phase_task_list in enumerate(phased_tasks):
+    for i, phase_task_list in enumerate(phased_task_dicts):
         task_ids = [t.get("id", "?") for t in phase_task_list]
         print(f"  Phase {i + 1} tasks: {', '.join(task_ids) if task_ids else '(empty)'}")
 
-    # Step 3: Read existing files from workspace (for files_to_modify context)
-    existing_files = _read_existing_files(workspace, tasks)
+    # --- Prepare shared state for build_fn callbacks ---
+    existing_files = _read_existing_files(workspace, task_dicts)
     if existing_files:
         print(f"[Orchestrator] Read {len(existing_files)} existing files from workspace")
 
-    # Step 4: Execute phases sequentially
-    completed_code: dict[str, str] = {}  # Accumulates across phases
-    phase_results: list[dict] = []
-    total_violations = 0
+    design_summary = design_spec.get("summary", "No design spec available.")
+    workspace_info = state.get("workspace_info") or {}
 
+    # Determine LLM availability (same logic as builder_node)
+    try:
+        from pineapple.llm import get_llm_client, has_any_llm_key
+        use_llm = has_any_llm_key()
+        llm = get_llm_client(stage="build") if use_llm else None
+    except ImportError:
+        use_llm = False
+        llm = None
+
+    import os
+    builder_mode = os.environ.get("PINEAPPLE_BUILDER", "single_shot")
+
+    # Retry feedback from prior attempts
+    attempt_counts = state.get("attempt_counts", {})
+    review_result: dict = {}
+    verify_record: dict = {}
+    if attempt_counts.get("build", 0) > 0:
+        review_result = state.get("review_result") or {}
+        verify_record = state.get("verify_record") or {}
+
+    # Shared mutable state (thread-safe via semaphore and lock)
+    completed_code: dict[str, str] = {}  # accumulates across phases
+    cumulative_files: list[FileWrite] = []
+    run_files: set[str] = set()
+
+    # Seed run_files from previous attempts for retry overwrite
+    if attempt_counts.get("build", 0) > 0:
+        for prev in state.get("build_results", []):
+            for fw in prev.get("files_written", []):
+                path = fw.get("path", "") if isinstance(fw, dict) else getattr(fw, "path", "")
+                if path:
+                    run_files.add(path)
+
+    build_results: list[dict] = []
+    total_cost = 0.0
+    total_violations = 0
+    results_lock = threading.Lock()
+
+    manifest_path = state.get("_manifest_path")
     if manifest_path:
         update_manifest(manifest_path, 5, "in_progress", {
             "phase_count": len(phases),
-            "task_count": len(tasks),
+            "task_count": len(task_dicts),
         })
 
-    for phase_idx, phase_task_list in enumerate(phased_tasks):
+    # --- Step 3: Execute phases sequentially ---
+    for phase_idx, phase_task_list in enumerate(phased_task_dicts):
         phase_num = phase_idx + 1
-        print(f"\n[Orchestrator] === Phase {phase_num}/{len(phased_tasks)} ===")
+        print(f"\n[Orchestrator] === Phase {phase_num}/{len(phased_task_dicts)} ===")
 
         if not phase_task_list:
             print(f"[Orchestrator] Phase {phase_num}: no tasks, skipping")
-            phase_results.append({
-                "phase": phase_num,
-                "tasks": [],
-                "violations": [],
-                "files_collected": 0,
-            })
             continue
 
-        # 4a. Enrich each task with orchestrator context
-        for task in phase_task_list:
+        # 3a. Enrich each task with orchestrator context
+        for task_dict in phase_task_list:
             context = build_task_context(
-                task=task,
+                task=task_dict,
                 design_spec=design_spec,
                 completed_code=completed_code,
                 existing_files=existing_files,
             )
-            task["_orchestrator_context"] = context
+            # Also build workspace manifest
+            ws_manifest = build_workspace_manifest(
+                task=task_dict,
+                design_spec=design_spec,
+                existing_files=list(existing_files.keys()),
+                prior_phase_files=completed_code,
+            )
+            combined_context = ""
+            if ws_manifest:
+                combined_context += ws_manifest + "\n"
             if context:
-                print(f"  [{task.get('id', '?')}] Injected {len(context)} chars of context")
+                combined_context += context
+            task_dict["_orchestrator_context"] = combined_context
+            if combined_context:
+                print(f"  [{task_dict.get('id', '?')}] Injected {len(combined_context)} chars of context")
 
-        # 4b. The actual build execution happens in builder_node.
-        #     We yield the enriched tasks back. The caller is responsible
-        #     for running them through the LLM.
-        #
-        #     For post-phase steps (collect + validate), we do them after
-        #     the caller signals phase completion.
+        # 3b. Execute phase tasks (parallel within phase)
+        semaphore = threading.Semaphore(max_concurrent)
+        phase_results: list[tuple[dict, float]] = []  # (result_dict, cost)
 
-        # 4c. Collect output from this phase
+        def _run_task(task_dict: dict) -> tuple[dict, float, int]:
+            """Execute a single task behind the semaphore."""
+            tid = task_dict.get("id", "?")
+            original_task = task_by_id.get(tid)
+            if original_task is None:
+                # Reconstruct Task from dict if original not found
+                from pineapple.models import Task
+                original_task = Task(**task_dict)
+
+            # Inject orchestrator context as prior_context by patching
+            # cumulative_files with a synthetic entry containing the context
+            orchestrator_ctx = task_dict.get("_orchestrator_context", "")
+            extra_files: list[FileWrite] = []
+            if orchestrator_ctx:
+                extra_files = [FileWrite(
+                    path="__orchestrator_context__.md",
+                    content=orchestrator_ctx,
+                )]
+
+            with semaphore:
+                result, cost = build_fn(
+                    original_task, workspace, design_summary,
+                    extra_files + list(cumulative_files),
+                    review_result, verify_record, run_files,
+                    workspace_info, use_llm, llm, builder_mode,
+                    design_spec,
+                )
+                # Process: write files to disk and commit
+                files_count = process_fn(
+                    result, workspace, run_files,
+                    cumulative_files, workspace_info,
+                )
+                result_dict = result.model_dump() if hasattr(result, "model_dump") else result
+                return result_dict, cost, files_count
+
+        if len(phase_task_list) == 1:
+            # Single task -- run directly (no thread overhead)
+            rd, cost, fc = _run_task(phase_task_list[0])
+            with results_lock:
+                build_results.append(rd)
+                total_cost += cost
+        else:
+            # Parallel execution within phase
+            print(f"  [Orchestrator] Running {len(phase_task_list)} tasks in parallel (max {max_concurrent})")
+            with ThreadPoolExecutor(max_workers=min(len(phase_task_list), max_concurrent)) as executor:
+                futures = {}
+                for task_dict in phase_task_list:
+                    future = executor.submit(_run_task, task_dict)
+                    futures[future] = task_dict
+
+                for future in as_completed(futures):
+                    task_dict = futures[future]
+                    tid = task_dict.get("id", "?")
+                    try:
+                        rd, cost, fc = future.result()
+                        with results_lock:
+                            build_results.append(rd)
+                            total_cost += cost
+                    except Exception as e:
+                        print(f"    ERROR: Task {tid}: {e}")
+                        from pineapple.models import BuildResult
+                        err = BuildResult(
+                            task_id=tid,
+                            status="failed",
+                            commits=[],
+                            errors=[str(e)],
+                        )
+                        with results_lock:
+                            build_results.append(err.model_dump())
+
+        # 3d. Collect output files from disk (after all phase tasks complete)
         new_code = collect_phase_output(workspace, phase_task_list)
         completed_code.update(new_code)
-        print(f"  Phase {phase_num}: collected {len(new_code)} files")
+        print(f"  Phase {phase_num}: collected {len(new_code)} files from disk")
 
-        # 4d. Validate output
+        # 3e. Validate against architecture
         violations = validate_phase_output(workspace, phase_task_list, design_spec)
         total_violations += len(violations)
         if violations:
@@ -773,19 +1015,12 @@ def orchestrate_build(
         else:
             print(f"  Phase {phase_num}: all validations passed")
 
-        phase_results.append({
-            "phase": phase_num,
-            "tasks": [t.get("id", "?") for t in phase_task_list],
-            "violations": violations,
-            "files_collected": len(new_code),
-        })
-
-        # 4e. Update manifest after each phase
+        # 3f. Update manifest after each phase
         if manifest_path:
             update_manifest(manifest_path, 5, "in_progress", {
                 "current_phase": phase_num,
                 "phases_completed": phase_num,
-                "phases_total": len(phased_tasks),
+                "phases_total": len(phased_task_dicts),
                 "violations_so_far": total_violations,
             })
 
@@ -793,21 +1028,19 @@ def orchestrate_build(
     if manifest_path:
         final_status = "completed" if total_violations == 0 else "completed_with_warnings"
         update_manifest(manifest_path, 5, final_status, {
-            "phases_completed": len(phased_tasks),
-            "phases_total": len(phased_tasks),
+            "phases_completed": len(phased_task_dicts),
+            "phases_total": len(phased_task_dicts),
             "total_violations": total_violations,
             "files_produced": len(completed_code),
         })
 
+    completed = sum(1 for r in build_results if r.get("status") == "completed")
+    failed = sum(1 for r in build_results if r.get("status") == "failed")
     print(f"\n[Orchestrator] Build orchestration complete:")
-    print(f"  Phases: {len(phased_tasks)}")
+    print(f"  Phases: {len(phased_task_dicts)}")
+    print(f"  Tasks: {completed} completed, {failed} failed")
     print(f"  Total files: {len(completed_code)}")
     print(f"  Total violations: {total_violations}")
+    print(f"  Total cost: ${total_cost:.4f}")
 
-    return {
-        "phases": phase_results,
-        "total_violations": total_violations,
-        "phase_count": len(phased_tasks),
-        "task_phases": phased_tasks,
-        "completed_code": completed_code,
-    }
+    return build_results, total_cost

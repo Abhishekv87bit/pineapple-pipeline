@@ -245,6 +245,32 @@ def _scaffold_files(task_plan: dict, worktree_path: str = None) -> list:
 # ---------------------------------------------------------------------------
 
 
+def _scaffold_test_config(worktree_path: str) -> None:
+    """Write pytest.ini and conftest.py so agents don't waste turns on import errors."""
+    wp = Path(worktree_path)
+
+    # pytest.ini
+    pytest_ini = wp / "pytest.ini"
+    if not pytest_ini.exists():
+        pytest_ini.write_text("[pytest]\npythonpath = .\ntestpaths = tests\n")
+        print(f"  Scaffolded: pytest.ini")
+
+    # conftest.py at root
+    conftest = wp / "conftest.py"
+    if not conftest.exists():
+        conftest.write_text(
+            "import sys\nimport os\nsys.path.insert(0, os.path.dirname(__file__))\n"
+        )
+        print(f"  Scaffolded: conftest.py")
+
+    # tests/ directory
+    tests_dir = wp / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    tests_init = tests_dir / "__init__.py"
+    if not tests_init.exists():
+        tests_init.write_text("")
+
+
 def _scaffold_dirs_from_architecture(design_spec: dict, worktree_path: str) -> list[str]:
     """Create directory structure derived from architecture component file paths.
 
@@ -345,6 +371,12 @@ def setup_node(state: PipelineState) -> dict:
             print("  Architecture dir scaffolding: no file paths found in design_spec")
     else:
         print("  Architecture dir scaffolding: skipped (no worktree or design_spec)")
+
+    # 4a2. Scaffold pytest.ini + conftest.py so agents don't waste turns on import errors
+    if worktree_path:
+        _scaffold_test_config(worktree_path)
+    elif effective_dir:
+        _scaffold_test_config(effective_dir)
 
     # 4b. Scaffold stub files (only for greenfield — existing projects don't need stubs)
     scaffolded_files = []
