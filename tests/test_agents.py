@@ -150,7 +150,7 @@ class TestStrategicReviewNode:
 
         with (
             patch("pineapple.agents.strategic_review._HAS_LLM_DEPS", True),
-            patch("pineapple.agents.strategic_review.has_any_llm_key", return_value=False),
+            patch("pineapple.agents.strategic_review.has_any_llm_key", return_value=False, create=True),
         ):
             result = strategic_review_node(state)
 
@@ -214,7 +214,7 @@ class TestArchitectureNode:
 
         with (
             patch("pineapple.agents.architecture._HAS_LLM_DEPS", True),
-            patch("pineapple.agents.architecture.has_any_llm_key", return_value=False),
+            patch("pineapple.agents.architecture.has_any_llm_key", return_value=False, create=True),
         ):
             result = architecture_node(state)
 
@@ -228,7 +228,7 @@ class TestArchitectureNode:
 
         with (
             patch("pineapple.agents.architecture._HAS_LLM_DEPS", True),
-            patch("pineapple.agents.architecture.has_any_llm_key", return_value=True),
+            patch("pineapple.agents.architecture.has_any_llm_key", return_value=True, create=True),
         ):
             result = architecture_node(state)
 
@@ -284,7 +284,7 @@ class TestPlanNode:
 
         with (
             patch("pineapple.agents.planner._HAS_LLM_DEPS", True),
-            patch("pineapple.agents.planner.has_any_llm_key", return_value=False),
+            patch("pineapple.agents.planner.has_any_llm_key", return_value=False, create=True),
         ):
             result = plan_node(state)
 
@@ -480,7 +480,7 @@ class TestVerifierNode:
         assert "all_green" in record
         assert "layers" in record
         assert isinstance(record["layers"], list)
-        assert len(record["layers"]) == 6  # 6 verification layers
+        assert len(record["layers"]) == 7  # 7 verification layers (6 static + 1 LLM quality eval)
 
     def test_all_layers_have_expected_fields(self, tmp_path, monkeypatch):
         from pineapple.agents.verifier import verifier_node

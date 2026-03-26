@@ -448,13 +448,15 @@ def call_with_retry(
     """
     llm = client if client is not None else get_llm_client(stage=stage)
 
-    result = llm.create(
-        response_model=response_model,
-        system=system,
-        messages=messages,
-        max_tokens=max_tokens,
-        max_retries=max_retries,
-    )
+    from pineapple.spinner import Spinner
+    with Spinner(f"Calling {llm.provider}..."):
+        result = llm.create(
+            response_model=response_model,
+            system=system,
+            messages=messages,
+            max_tokens=max_tokens,
+            max_retries=max_retries,
+        )
 
     usage = _extract_usage(result, llm.provider)
     cost = estimate_cost(llm.provider, usage)

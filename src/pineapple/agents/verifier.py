@@ -215,6 +215,12 @@ def _run_security_scan(workspace: Optional[str] = None) -> LayerResult:
         except OSError:
             pass
 
+    # Filter out test file hits — test fixtures with dummy credentials are intentional
+    pattern_hits = [
+        hit for hit in pattern_hits
+        if not any(skip in hit for skip in ("test_", "_test.py", "conftest.py", "fixture"))
+    ]
+
     findings.extend(pattern_hits[:20])
 
     if findings:
@@ -567,6 +573,7 @@ def verifier_node(state: PipelineState) -> dict:
     workspace = (
         workspace_info.get("worktree_path")
         or state.get("target_dir")
+        or None
     )
 
     if workspace:

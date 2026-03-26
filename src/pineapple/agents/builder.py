@@ -6,6 +6,7 @@ Install dependencies with: pip install 'pineapple-pipeline[llm]'
 """
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from pineapple.models import BuildResult, FileWrite, Task, TaskPlan
@@ -269,6 +270,222 @@ def _make_error_result(task_id: str, error: str) -> BuildResult:
 
 
 # ---------------------------------------------------------------------------
+# Parallel task grouping
+# ---------------------------------------------------------------------------
+
+
+def _group_parallel_tasks(tasks: list[Task]) -> list[list[Task]]:
+    """Group tasks into batches that can run in parallel.
+
+    Tasks with no file overlap can run simultaneously.
+    Tasks are grouped greedily: each batch contains tasks whose
+    files_to_create and files_to_modify don't overlap.
+    """
+    batches: list[list[Task]] = []
+
+    for task in tasks:
+        task_files = set(task.files_to_create or []) | set(task.files_to_modify or [])
+
+        # Try to add to the last batch
+        placed = False
+        if batches:
+            batch = batches[-1]
+            batch_files: set[str] = set()
+            for t in batch:
+                batch_files |= set(t.files_to_create or []) | set(t.files_to_modify or [])
+
+            if not task_files & batch_files:  # No overlap
+                batch.append(task)
+                placed = True
+
+        if not placed:
+            batches.append([task])
+
+    return batches
+
+
+# ---------------------------------------------------------------------------
+# Per-task execution helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_one_task(
+    task: Task, workspace: str, design_summary: str,
+    cumulative_files: list[FileWrite], review_result: dict,
+    verify_record: dict, run_files: set[str], workspace_info: dict,
+    use_llm: bool, llm, builder_mode: str,
+) -> tuple[BuildResult, float]:
+    """Build a single task using either single-shot or agent mode."""
+    print(f"  [Build] Task {task.id}: {task.description}")
+
+    # Build prior context
+    prior_context = ""
+    if cumulative_files:
+        prior_context = "Previously completed files in this run (do NOT recreate, but you may import from them):\n"
+        for fw in cumulative_files:
+            content_preview = fw.content[:2000] if fw.content else "(empty)"
+            prior_context += f"\n--- {fw.path} ---\n{content_preview}\n"
+    if review_result or verify_record:
+        task_feedback = _get_task_feedback(task, review_result, verify_record)
+        if task_feedback:
+            prior_context = task_feedback + prior_context
+
+    if not use_llm:
+        result = _build_task_fallback(task)
+        print(f"    Status: {result.status} (fallback), Files: {len(result.files_written)}")
+        return result, 0.0
+
+    if builder_mode == "agent":
+        return _build_task_agent(task, workspace, design_summary, prior_context)
+    else:
+        return _build_task_single_shot(task, design_summary, llm, prior_context)
+
+
+def _build_task_single_shot(
+    task: Task, design_summary: str, llm, prior_context: str,
+) -> tuple[BuildResult, float]:
+    """Original single-shot LLM call."""
+    try:
+        result, task_cost = _call_llm_for_task(task, design_summary, llm=llm, prior_context=prior_context)
+        result.task_id = task.id
+        print(f"    Status: {result.status}, Commits: {len(result.commits)}, Files: {len(result.files_written)}, Cost: ${task_cost:.4f}")
+        return result, task_cost
+    except Exception as e:
+        print(f"    ERROR: {e}")
+        return _make_error_result(task.id, str(e)), 0.0
+
+
+def _build_task_agent(
+    task: Task, workspace: str, design_summary: str, prior_context: str,
+) -> tuple[BuildResult, float]:
+    """Multi-turn agent with tools."""
+    try:
+        from pineapple.agents.agent_builder import run_agent_task
+    except ImportError as exc:
+        print(f"    Agent builder not available: {exc}, falling back to single-shot")
+        return _build_task_single_shot(task, design_summary, None, prior_context)
+
+    try:
+        files_written, cost, summary = run_agent_task(
+            task_description=task.description,
+            workspace=workspace,
+            design_summary=design_summary,
+            prior_context=prior_context,
+            files_to_create=task.files_to_create,
+            files_to_modify=task.files_to_modify,
+        )
+
+        # Convert to BuildResult
+        result = BuildResult(
+            task_id=task.id,
+            status="completed",
+            commits=[f"feat: {summary[:100]}"],
+            errors=[],
+            files_written=[FileWrite(path=f["path"], content=f["content"]) for f in files_written],
+        )
+        print(f"    Status: completed (agent), Files: {len(files_written)}, Cost: ${cost:.4f}")
+        return result, cost
+    except Exception as e:
+        print(f"    ERROR (agent): {e}")
+        return _make_error_result(task.id, str(e)), 0.0
+
+
+def _process_build_result(
+    result: BuildResult, workspace: str, run_files: set[str],
+    cumulative_files: list[FileWrite], workspace_info: dict,
+) -> int:
+    """Write files to disk and git commit. Returns count of files written."""
+    files_written_count = 0
+    if result.files_written and result.status == "completed":
+        written = _write_files_to_disk(result.files_written, workspace, own_files=run_files)
+        files_written_count = len(written)
+        run_files.update(written)
+        cumulative_files.extend(fw for fw in result.files_written if fw.path in written)
+        if written:
+            print(f"    Wrote {len(written)} file(s): {', '.join(written)}")
+
+        tools = workspace_info.get("tools_available", {})
+        if not tools.get("git", True):
+            pass
+        else:
+            if result.commits:
+                commit_msg = result.commits[0]
+            else:
+                commit_msg = f"build({result.task_id}): task completed"
+            committed = _git_commit(workspace, commit_msg)
+            if committed:
+                print(f"    Committed: {commit_msg}")
+            else:
+                print(f"    Git commit skipped (no git or nothing to commit)")
+    return files_written_count
+
+
+# ---------------------------------------------------------------------------
+# Per-task retry feedback helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_task_feedback(task: Task, review_result: dict, verify_record: dict) -> str:
+    """Build retry feedback targeted to a specific task's files."""
+    task_files = set(task.files_to_create or []) | set(task.files_to_modify or [])
+    if not task_files:
+        # No file info — give all feedback
+        return _build_general_feedback(review_result, verify_record)
+
+    feedback_parts = []
+
+    # Filter reviewer issues to those mentioning this task's files
+    for level, key in [("CRITICAL", "critical_issues"), ("IMPORTANT", "important_issues")]:
+        issues = review_result.get(key, [])
+        relevant = [i for i in issues if any(f in i for f in task_files)]
+        # Also include issues that don't mention any specific file (general issues)
+        general = [i for i in issues if not any("." in word and "/" in word for word in i.split())]
+        combined = list(dict.fromkeys(relevant + general))  # dedupe, preserve order
+        if combined:
+            feedback_parts.append(f"{level} ISSUES:\n" + "\n".join(f"  - {i}" for i in combined))
+
+    # Filter verifier failures
+    layers = verify_record.get("layers", [])
+    failed_layers = [l for l in layers if l.get("status") == "fail"]
+    if failed_layers:
+        layer_details = [f"  - {l.get('name', '?')}: {l.get('details', '')[:200]}" for l in failed_layers]
+        feedback_parts.append("VERIFICATION FAILURES:\n" + "\n".join(layer_details))
+
+    if not feedback_parts:
+        return ""
+
+    return (
+        "\n\n=== RETRY FEEDBACK (targeted to this task) ===\n"
+        "The previous build attempt had these issues. You MUST fix them in this attempt:\n\n"
+        + "\n\n".join(feedback_parts)
+        + "\n=== END RETRY FEEDBACK ===\n\n"
+    )
+
+
+def _build_general_feedback(review_result: dict, verify_record: dict) -> str:
+    """Build general feedback when task has no file info."""
+    feedback_parts = []
+    for level, key in [("CRITICAL", "critical_issues"), ("IMPORTANT", "important_issues")]:
+        issues = review_result.get(key, [])
+        if issues:
+            feedback_parts.append(f"{level} ISSUES:\n" + "\n".join(f"  - {i}" for i in issues))
+    layers = verify_record.get("layers", [])
+    failed = [l for l in layers if l.get("status") == "fail"]
+    if failed:
+        feedback_parts.append("VERIFICATION FAILURES:\n" + "\n".join(
+            f"  - {l.get('name', '?')}: {l.get('details', '')[:200]}" for l in failed
+        ))
+    if not feedback_parts:
+        return ""
+    return (
+        "\n\n=== RETRY FEEDBACK ===\n"
+        "The previous build attempt had these issues. You MUST fix them in this attempt:\n\n"
+        + "\n\n".join(feedback_parts)
+        + "\n=== END RETRY FEEDBACK ===\n\n"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public node
 # ---------------------------------------------------------------------------
 
@@ -340,6 +557,13 @@ def builder_node(state: PipelineState) -> dict:
         provider = llm.provider
         print(f"  [Build] Using provider: {provider}")
 
+    # Check builder mode: single_shot (default) or agent (multi-turn with tools)
+    builder_mode = os.environ.get("PINEAPPLE_BUILDER", "single_shot")
+    if builder_mode == "agent":
+        print(f"  [Build] Mode: AGENT (multi-turn with tools)")
+    else:
+        print(f"  [Build] Mode: single-shot")
+
     build_results = []  # type: list[dict]
     total_cost = 0.0
     total_files_written = 0
@@ -359,106 +583,65 @@ def builder_node(state: PipelineState) -> dict:
         if run_files:
             print(f"  [Build] Retry attempt {attempt_counts['build'] + 1}: {len(run_files)} files from previous pass marked for overwrite")
 
-    # On retry: build feedback context from reviewer and verifier
-    retry_feedback = ""
+    # On retry: extract reviewer/verifier results for per-task feedback injection
+    review_result: dict = {}
+    verify_record: dict = {}
     if attempt_counts.get("build", 0) > 0:
         review_result = state.get("review_result") or {}
         verify_record = state.get("verify_record") or {}
-
-        feedback_parts = []
-
-        # Reviewer's critical and important issues
         critical = review_result.get("critical_issues", [])
         important = review_result.get("important_issues", [])
-        if critical:
-            feedback_parts.append("CRITICAL ISSUES FROM REVIEWER (must fix):\n" + "\n".join(f"  - {i}" for i in critical))
-        if important:
-            feedback_parts.append("IMPORTANT ISSUES FROM REVIEWER:\n" + "\n".join(f"  - {i}" for i in important))
+        if critical or important or verify_record.get("layers"):
+            print(f"  [Build] Retry attempt: per-task feedback enabled ({len(critical)} critical, {len(important)} important issues)")
 
-        # Verifier's layer failures
-        layers = verify_record.get("layers", [])
-        failed_layers = [l for l in layers if l.get("status") == "fail"]
-        if failed_layers:
-            layer_details = []
-            for l in failed_layers:
-                name = l.get("name", "unknown")
-                details = l.get("details", "")[:200]
-                layer_details.append(f"  - {name}: {details}")
-            feedback_parts.append("VERIFICATION FAILURES:\n" + "\n".join(layer_details))
+    # Group tasks for parallel execution
+    task_batches = _group_parallel_tasks(task_plan.tasks)
+    parallel_tasks = sum(len(b) for b in task_batches if len(b) > 1)
+    if parallel_tasks > 0:
+        print(f"  [Build] Task batches: {len(task_batches)} ({parallel_tasks} tasks can run in parallel)")
 
-        if feedback_parts:
-            retry_feedback = (
-                "\n\n=== RETRY FEEDBACK (from previous attempt) ===\n"
-                "The previous build attempt had these issues. You MUST fix them in this attempt:\n\n"
-                + "\n\n".join(feedback_parts)
-                + "\n=== END RETRY FEEDBACK ===\n\n"
+    for batch_idx, batch in enumerate(task_batches):
+        if len(batch) == 1:
+            # Single task -- run directly
+            task = batch[0]
+            result, task_cost = _build_one_task(
+                task, workspace, design_summary, cumulative_files,
+                review_result, verify_record, run_files, workspace_info,
+                use_llm, llm, builder_mode,
             )
-            print(f"  [Build] Injecting reviewer/verifier feedback into builder context ({len(critical)} critical, {len(important)} important issues)")
-
-    for task in task_plan.tasks:
-        print(f"  [Build] Task {task.id}: {task.description}")
-
-        # Build prior context string from files written by earlier tasks
-        # Include actual content (truncated) so later tasks know what was implemented
-        prior_context = ""
-        if cumulative_files:
-            prior_context = (
-                "Previously completed files in this run (do NOT recreate, "
-                "but you may import from them):\n"
+            total_cost += task_cost
+            build_results.append(result.model_dump())
+            total_files_written += _process_build_result(
+                result, workspace, run_files, cumulative_files, workspace_info,
             )
-            for fw in cumulative_files:
-                content_preview = fw.content[:2000] if fw.content else "(empty)"
-                prior_context += f"\n--- {fw.path} ---\n{content_preview}\n"
-
-        # Prepend retry feedback to prior context so builder knows what to fix
-        if retry_feedback:
-            prior_context = retry_feedback + prior_context
-
-        if use_llm:
-            try:
-                result, task_cost = _call_llm_for_task(
-                    task, design_summary, llm=llm, prior_context=prior_context,
-                )
-                # Ensure task_id matches
-                result.task_id = task.id
-                total_cost += task_cost
-                print(f"    Status: {result.status}, Commits: {len(result.commits)}, Files: {len(result.files_written)}, Cost: ${task_cost:.4f}")
-            except Exception as e:
-                print(f"    ERROR: {e}")
-                result = _make_error_result(task.id, str(e))
         else:
-            result = _build_task_fallback(task)
-            print(f"    Status: {result.status} (fallback), Files: {len(result.files_written)}")
+            # Parallel batch
+            print(f"  [Build] Running batch {batch_idx+1} in parallel: {', '.join(t.id for t in batch)}")
+            max_workers = min(len(batch), 3)  # Cap at 3 concurrent
+            futures = {}
 
-        # Write files to disk
-        if result.files_written and result.status == "completed":
-            written = _write_files_to_disk(result.files_written, workspace, own_files=run_files)
-            total_files_written += len(written)
-            run_files.update(written)  # track for retry re-overwrite
-            # Track FileWrite objects (not just paths) for rich prior context
-            cumulative_files.extend(
-                fw for fw in result.files_written
-                if fw.path in written
-            )
-            if written:
-                print(f"    Wrote {len(written)} file(s): {', '.join(written)}")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for task in batch:
+                    future = executor.submit(
+                        _build_one_task,
+                        task, workspace, design_summary, cumulative_files,
+                        review_result, verify_record, run_files, workspace_info,
+                        use_llm, llm, builder_mode,
+                    )
+                    futures[future] = task
 
-            # Git commit for this task (only if git is available)
-            tools = workspace_info.get("tools_available", {})
-            if not tools.get("git", True):  # default True for backward compat
-                print("  [Build] Git not available, skipping commits")
-            else:
-                if result.commits:
-                    commit_msg = result.commits[0]
-                else:
-                    commit_msg = f"build({task.id}): {task.description}"
-                committed = _git_commit(workspace, commit_msg)
-                if committed:
-                    print(f"    Committed: {commit_msg}")
-                else:
-                    print(f"    Git commit skipped (no git or nothing to commit)")
-
-        build_results.append(result.model_dump())
+                for future in as_completed(futures):
+                    task = futures[future]
+                    try:
+                        result, task_cost = future.result()
+                        total_cost += task_cost
+                        build_results.append(result.model_dump())
+                        total_files_written += _process_build_result(
+                            result, workspace, run_files, cumulative_files, workspace_info,
+                        )
+                    except Exception as e:
+                        print(f"    ERROR: Task {task.id}: {e}")
+                        build_results.append(_make_error_result(task.id, str(e)).model_dump())
 
     completed = sum(1 for r in build_results if r["status"] == "completed")
     failed = sum(1 for r in build_results if r["status"] == "failed")

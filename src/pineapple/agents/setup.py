@@ -158,6 +158,41 @@ def _setup_worktree(
     return str(worktree_dir), branch_name
 
 
+def _install_deps(workspace: str) -> None:
+    """Install dependencies in the workspace if requirements files exist."""
+    ws = Path(workspace)
+    installed = False
+
+    # Try pyproject.toml first (editable install)
+    if (ws / "pyproject.toml").exists():
+        print("  [Setup] Installing from pyproject.toml...")
+        result = subprocess.run(
+            ["pip", "install", "-e", ".", "--quiet"],
+            capture_output=True, text=True, timeout=120, cwd=workspace,
+        )
+        if result.returncode == 0:
+            installed = True
+            print("  [Setup] Dependencies installed from pyproject.toml")
+        else:
+            print(f"  [Setup] pip install -e . failed: {result.stderr[:200]}")
+
+    # Try requirements files
+    for req_file in sorted(ws.glob("requirements*.txt")):
+        print(f"  [Setup] Installing from {req_file.name}...")
+        result = subprocess.run(
+            ["pip", "install", "-r", str(req_file), "--quiet"],
+            capture_output=True, text=True, timeout=120, cwd=workspace,
+        )
+        if result.returncode == 0:
+            installed = True
+            print(f"  [Setup] Dependencies installed from {req_file.name}")
+        else:
+            print(f"  [Setup] pip install -r {req_file.name} failed: {result.stderr[:200]}")
+
+    if not installed:
+        print("  [Setup] No requirements files found, skipping dep install")
+
+
 def _scaffold_files(task_plan: dict, worktree_path: str = None) -> list:
     """Create stub files for each planned file in the task plan.
 
@@ -265,6 +300,13 @@ def setup_node(state: PipelineState) -> dict:
             print(f"  Scaffolded {len(scaffolded_files)} files")
     else:
         print("  Scaffolding: skipped (no task plan)")
+
+    # 5. Install dependencies in the workspace
+    install_root = worktree_path or effective_dir
+    if install_root and Path(install_root).is_dir():
+        _install_deps(install_root)
+    else:
+        print("  [Setup] No workspace directory available, skipping dep install")
 
     # Build workspace_info (always propagate target_dir for downstream fallback)
     workspace_info = {

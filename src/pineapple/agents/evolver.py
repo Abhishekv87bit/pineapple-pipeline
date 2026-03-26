@@ -127,6 +127,25 @@ def evolve_node(state: PipelineState) -> dict:
     else:
         print("  [Evolve] Neo4j: Skipped (NEO4J_URI not set)")
 
+    # --- ChromaDB: Store project for future similarity search ---
+    try:
+        from pineapple.agents.intake import store_project_in_chromadb
+        design_spec = state.get("design_spec") or {}
+        request = state.get("request", "")
+        summary = design_spec.get("summary", "")
+        stored = store_project_in_chromadb(
+            project_name=project_name,
+            request=request,
+            summary=summary,
+            design_spec=design_spec,
+        )
+        if stored:
+            print(f"  [Evolve] ChromaDB: Stored project '{project_name}' for future search")
+        else:
+            print("  [Evolve] ChromaDB: Could not store project (chromadb not available)")
+    except Exception as exc:
+        print(f"  [Evolve] ChromaDB: Failed — {exc}")
+
     # Update report with real memory extractions
     report = EvolveReport(
         session_handoff_path=handoff_path,

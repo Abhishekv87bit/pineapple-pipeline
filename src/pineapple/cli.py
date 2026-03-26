@@ -154,6 +154,16 @@ def _cmd_run(args: argparse.Namespace) -> None:
     run_id = str(uuid.uuid4())
     path = args.path or "full"  # default; auto-detect logic will live in Intake later
 
+    if getattr(args, 'fresh', False):
+        # Remove old checkpoints to ensure a truly fresh start
+        db_path = os.path.abspath(DEFAULT_DB_PATH)
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+                print(f"[INFO] Fresh run: cleared old checkpoint database")
+            except OSError:
+                pass
+
     print(f"[INFO] Pipeline run started: {run_id}")
     print(f"[INFO] Path: {path}")
     print(f"[INFO] Request: {args.request}")
@@ -327,6 +337,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-dir", "-t",
         default=None,
         help="Target project directory to analyze (default: current working directory)",
+    )
+    run_parser.add_argument(
+        "--fresh",
+        action="store_true",
+        default=False,
+        help="Force a fresh run (ignore any existing checkpoints with the same ID)",
     )
     run_parser.set_defaults(func=_cmd_run)
 
