@@ -346,6 +346,19 @@ def builder_node(state: PipelineState) -> dict:
     cumulative_files = []  # type: list[FileWrite]  # tracks files written across tasks
     run_files: set[str] = set()  # paths written by THIS pipeline run (allow re-overwrite on retry)
 
+    # On retry: seed run_files from previous build results so we can overwrite
+    # files that were written in earlier passes (fixes the stuck retry loop).
+    attempt_counts = state.get("attempt_counts", {})
+    if attempt_counts.get("build", 0) > 0:
+        previous_results = state.get("build_results", [])
+        for prev in previous_results:
+            for fw in prev.get("files_written", []):
+                path = fw.get("path", "") if isinstance(fw, dict) else getattr(fw, "path", "")
+                if path:
+                    run_files.add(path)
+        if run_files:
+            print(f"  [Build] Retry attempt {attempt_counts['build'] + 1}: {len(run_files)} files from previous pass marked for overwrite")
+
     for task in task_plan.tasks:
         print(f"  [Build] Task {task.id}: {task.description}")
 

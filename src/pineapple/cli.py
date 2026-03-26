@@ -351,7 +351,7 @@ def main() -> None:
     # Load .env file (keys for LangFuse, Mem0, Neo4j, etc.)
     try:
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(override=True)
     except ImportError:
         pass
     parser = _build_parser()

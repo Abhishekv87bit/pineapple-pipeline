@@ -33,3 +33,31 @@ Status: All 14 items resolved
 ## Dependencies removed from pyproject.toml
 - `tenacity>=9.0,<10.0` (now transitive only)
 - `pybreaker>=1.0,<2.0` (removed entirely)
+
+## E2E Run Results (2026-03-25)
+
+Ran pipeline on KFS (Kinetic Forge Studio) with real Gemini API calls.
+
+### What worked
+- All 10 stages execute in order
+- Real Gemini LLM calls: Strategic Review, Architecture, Plan (18 tasks), Build (22 files), Review
+- Human-in-the-loop gates pause correctly at 4 points
+- Git worktree isolation: code written to `.pineapple/worktrees/`, not real KFS
+- Verify runs 7 layers and catches real issues (missing modules, hardcoded secrets, syntax errors)
+- Review correctly verdicts "retry" on failed verification
+- LangFuse traces: 76 traces captured (55 build, 8 review, 4 strategic_review, 3 plan, 3 architecture)
+- Total cost: ~$0.04 across all LLM calls
+- Checkpoint/resume works (paused and resumed mid-run)
+
+### Bugs found
+1. **CRITICAL: Retry loop stuck** — Builder skips existing files on retry (`[SKIP] already exists`), so reviewer's issues are never fixed. Pipeline loops build→verify→review→retry until max_attempts.
+   - Root cause: `run_files` set resets to empty on each `builder_node()` call. Previous build pass files aren't tracked as "own files."
+   - Fix: Seed `run_files` from `state["build_results"]` on retry attempts.
+
+2. **Mem0/Neo4j never reached** — Pipeline never completes Stage 9 (Evolve) because it gets stuck in the retry loop. External service integration untested in real E2E.
+
+3. **Request misinterpretation** — "Run full E2E verification of KFS" was interpreted as "build an E2E test framework for KFS" instead of "run the pipeline on KFS." Not a bug per se, but shows the LLM needs better context about what the pipeline does vs what the target project is.
+
+### LangFuse dashboard confirmed
+- cloud.langfuse.com shows all traces with input/output/latency/tokens
+- Stage-level trace names: pineapple:build, pineapple:review, pineapple:strategic_review, etc.
