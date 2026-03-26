@@ -8,6 +8,7 @@ import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from pineapple.state import PipelineState
 
@@ -244,6 +245,46 @@ def _scaffold_files(task_plan: dict, worktree_path: str = None) -> list:
 # ---------------------------------------------------------------------------
 
 
+def _scaffold_dirs_from_architecture(design_spec: dict, worktree_path: str) -> list[str]:
+    """Create directory structure derived from architecture component file paths.
+
+    Inspects design_spec for any list values that look like file paths and
+    creates the parent directories so agents write to the correct locations
+    instead of inventing a flat structure.
+
+    Returns list of unique directory paths that were created.
+    """
+    if not design_spec or not worktree_path:
+        return []
+
+    base = Path(worktree_path)
+    dirs_created: list[str] = []
+    seen: set[str] = set()
+
+    def _collect_paths(obj: Any) -> None:
+        if isinstance(obj, str):
+            # Heuristic: treat as file path if it contains a slash and an extension
+            if ("/" in obj or "\\" in obj) and "." in obj.split("/")[-1].split("\\")[-1]:
+                parent = str(Path(obj.replace("\\", "/")).parent)
+                if parent and parent != "." and parent not in seen:
+                    seen.add(parent)
+                    target = base / parent
+                    try:
+                        target.mkdir(parents=True, exist_ok=True)
+                        dirs_created.append(parent)
+                    except OSError as exc:
+                        print(f"  [WARN] Could not create dir {parent}: {exc}")
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                _collect_paths(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _collect_paths(item)
+
+    _collect_paths(design_spec)
+    return dirs_created
+
+
 def setup_node(state: PipelineState) -> dict:
     """Prepare workspace: check tools, create worktree, scaffold files."""
     run_id = state.get("run_id", "unknown")
@@ -251,6 +292,7 @@ def setup_node(state: PipelineState) -> dict:
     request = state.get("request", "")
     pipeline_path = state.get("path", "full")
     task_plan = state.get("task_plan")
+    design_spec = state.get("design_spec") or {}
     target_dir = state.get("target_dir", "")
 
     print(f"[STAGE 4] Setting up workspace for run {run_id}...")
@@ -292,7 +334,19 @@ def setup_node(state: PipelineState) -> dict:
     else:
         print("  Worktree: skipped (git not available)")
 
-    # 4. Scaffold stub files (only for greenfield — existing projects don't need stubs)
+    # 4a. Scaffold directories from architecture (before file scaffolding)
+    if worktree_path and design_spec:
+        arch_dirs = _scaffold_dirs_from_architecture(design_spec, worktree_path)
+        if arch_dirs:
+            print(f"  Scaffolded {len(arch_dirs)} directories from architecture:")
+            for d in arch_dirs:
+                print(f"    {d}/")
+        else:
+            print("  Architecture dir scaffolding: no file paths found in design_spec")
+    else:
+        print("  Architecture dir scaffolding: skipped (no worktree or design_spec)")
+
+    # 4b. Scaffold stub files (only for greenfield — existing projects don't need stubs)
     scaffolded_files = []
     if task_plan and not target_dir:
         scaffolded_files = _scaffold_files(task_plan, worktree_path)

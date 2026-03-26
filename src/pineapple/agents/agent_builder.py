@@ -212,6 +212,7 @@ def run_agent_task(
     files_to_create: list[str] | None = None,
     files_to_modify: list[str] | None = None,
     max_turns: int | None = None,
+    architecture_context: str = "",
 ) -> tuple[list[dict], float, str]:
     """Run a Gemini agent conversation for a single build task.
 
@@ -226,6 +227,9 @@ def run_agent_task(
         files_to_create: Expected files to create.
         files_to_modify: Expected files to modify.
         max_turns: Override for MAX_TURNS.
+        architecture_context: Excerpt from the architecture document relevant to
+            this task.  When provided, injected into the agent system message as
+            a binding contract for file paths, class names, and imports.
 
     Returns:
         Tuple of (files_written_dicts, cost_usd, summary).
@@ -261,6 +265,17 @@ def run_agent_task(
         "- Use environment variables for secrets, never hardcode\n"
         "- Call task_complete when done\n"
     )
+
+    if architecture_context:
+        system += (
+            "\n\n## Architecture Contract\n"
+            "The following architecture specification is BINDING. You MUST:\n"
+            "- Write files to the EXACT paths specified below\n"
+            "- Use the EXACT class/function names from the interfaces below\n"
+            "- Import from the EXACT modules specified below\n"
+            "- Do NOT create files at different paths or with different names\n\n"
+            + architecture_context
+        )
 
     # Build the initial user message
     user_msg = f"## Task\n{task_description}\n\n"

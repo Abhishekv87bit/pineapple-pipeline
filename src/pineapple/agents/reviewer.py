@@ -55,6 +55,7 @@ You are a senior code reviewer. You receive:
 1. A design specification (what SHOULD have been built)
 2. Build results (what WAS built)
 3. Verification results (test outcomes)
+4. An architecture document (optional — when provided, it defines exact file paths, interfaces, and build order)
 
 Your job is to compare the implementation against the spec and tests, then
 produce a verdict:
@@ -62,11 +63,16 @@ produce a verdict:
 - "retry" — fixable issues found, send back to builder
 - "fail" — fundamental problems, needs human intervention
 
+If an architecture document is provided, check that files are at the correct paths, interfaces match the spec, and dependencies follow the build order.
+
 Be specific about issues found. Categorize them as critical, important, or minor."""
 
 _USER_PROMPT_TEMPLATE = """\
 ## Design Specification
 {design_spec}
+
+## Architecture Document
+{architecture_doc}
 
 ## Build Results
 {build_results}
@@ -215,7 +221,7 @@ def _merge_chunk_results(chunk_results: list[dict[str, Any]]) -> ReviewResult:
 # ---------------------------------------------------------------------------
 
 
-def _call_llm(design_spec: str, build_results: str, verify_record: str, is_lightweight: bool = False) -> tuple[ReviewResult, str, float]:
+def _call_llm(design_spec: str, build_results: str, verify_record: str, is_lightweight: bool = False, architecture_doc: str = "") -> tuple[ReviewResult, str, float]:
     """Call the LLM via the router and return (ReviewResult, provider, cost_usd).
 
     Uses real token counts from the response when available, otherwise
@@ -236,6 +242,7 @@ def _call_llm(design_spec: str, build_results: str, verify_record: str, is_light
         system=system,
         messages=[{"role": "user", "content": _USER_PROMPT_TEMPLATE.format(
             design_spec=design_spec,
+            architecture_doc=architecture_doc or "(none provided)",
             build_results=build_results,
             verify_record=verify_record,
         )}],
@@ -250,6 +257,7 @@ def _call_llm_chunk(
     build_results: str,
     verify_record: str,
     is_lightweight: bool = False,
+    architecture_doc: str = "",
 ) -> tuple[ReviewResult, str, float]:
     """Call the LLM for a single chunk/module review."""
     system = _CHUNK_SYSTEM_PROMPT.format(module_name=module_name)
@@ -287,6 +295,7 @@ def _review_chunked_llm(
     build_results: str,
     verify_record: str,
     is_lightweight: bool = False,
+    architecture_doc: str = "",
 ) -> tuple[ReviewResult, float]:
     """Dispatch parallel LLM reviews for each chunk, merge results.
 
@@ -305,6 +314,7 @@ def _review_chunked_llm(
             build_results=build_results,
             verify_record=verify_record,
             is_lightweight=is_lightweight,
+            architecture_doc=architecture_doc,
         )
         return {"module": module, "result": result.model_dump(), "provider": provider, "cost": cost}
 
@@ -423,6 +433,7 @@ def reviewer_node(state: PipelineState) -> dict:
     build_results = state.get("build_results", [])
     verify_record = state.get("verify_record")
     design_spec_data = state.get("design_spec") or {}
+    architecture_doc = design_spec_data.get("_raw_document", "") or ""
     changed_files = state.get("changed_files") or []
     is_lightweight = state.get("path") == "lightweight"
 
@@ -452,6 +463,7 @@ def reviewer_node(state: PipelineState) -> dict:
                     build_results=str(build_results),
                     verify_record=str(verify_record),
                     is_lightweight=is_lightweight,
+                    architecture_doc=architecture_doc,
                 )
             else:
                 print("  [Review] Calling LLM for code review...")
@@ -460,6 +472,7 @@ def reviewer_node(state: PipelineState) -> dict:
                     build_results=str(build_results),
                     verify_record=str(verify_record),
                     is_lightweight=is_lightweight,
+                    architecture_doc=architecture_doc,
                 )
 
             print(f"  [Review] Verdict: {result.verdict} (cost: ${call_cost:.4f})")

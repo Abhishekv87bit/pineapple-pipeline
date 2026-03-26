@@ -60,7 +60,13 @@ Do NOT define mock classes inline. Do NOT redefine the classes being tested.
 Use pytest fixtures and unittest.mock only for external dependencies (APIs, databases).
 
 Write production-quality code. Do NOT return placeholders, descriptions, or
-pseudo-code. Return actual runnable implementation."""
+pseudo-code. Return actual runnable implementation.
+
+If an architecture document is provided, you MUST:
+- Write files to the EXACT paths specified in the architecture
+- Use the EXACT class/function names from the architecture interfaces
+- Import from the EXACT modules specified in the architecture
+- Do NOT create files at different paths or with different names"""
 
 _USER_PROMPT_TEMPLATE = """\
 Task ID: {task_id}
@@ -309,14 +315,60 @@ def _group_parallel_tasks(tasks: list[Task]) -> list[list[Task]]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_architecture_context(task: Task, design_spec: dict) -> str:
+    """Extract the architecture section relevant to a task from the design spec.
+
+    Looks for the raw architecture document and finds the section(s) that mention
+    the task's files or description keywords.
+
+    Returns an empty string when no architecture context is available.
+    """
+    raw_architecture = design_spec.get("_raw_document", "")
+    if not raw_architecture:
+        return ""
+
+    task_files = set(task.files_to_create or []) | set(task.files_to_modify or [])
+    if not task_files and not task.description:
+        return raw_architecture  # No filter criteria — return everything
+
+    # Collect lines from the document that are near mentions of the task's files
+    # or description keywords.  We use a simple sliding-window approach: include
+    # any paragraph/section that contains at least one matching token.
+    description_keywords = set(
+        w.lower() for w in task.description.split() if len(w) > 4
+    )
+    file_basenames = {Path(f).name for f in task_files} | {Path(f).stem for f in task_files}
+    search_tokens = {f.lower() for f in file_basenames} | description_keywords
+
+    paragraphs = raw_architecture.split("\n\n")
+    relevant = []
+    for para in paragraphs:
+        para_lower = para.lower()
+        if any(tok in para_lower for tok in search_tokens):
+            relevant.append(para)
+
+    if not relevant:
+        # Nothing matched — return first 3000 chars as generic context
+        return raw_architecture[:3000]
+
+    excerpt = "\n\n".join(relevant)
+    if len(excerpt) > 4000:
+        excerpt = excerpt[:4000] + "\n... (truncated)"
+    return excerpt
+
+
 def _build_one_task(
     task: Task, workspace: str, design_summary: str,
     cumulative_files: list[FileWrite], review_result: dict,
     verify_record: dict, run_files: set[str], workspace_info: dict,
     use_llm: bool, llm, builder_mode: str,
+    design_spec: dict | None = None,
 ) -> tuple[BuildResult, float]:
     """Build a single task using either single-shot or agent mode."""
     print(f"  [Build] Task {task.id}: {task.description}")
+
+    if design_spec is None:
+        design_spec = {}
 
     # Build prior context
     prior_context = ""
@@ -336,7 +388,8 @@ def _build_one_task(
         return result, 0.0
 
     if builder_mode == "agent":
-        return _build_task_agent(task, workspace, design_summary, prior_context)
+        architecture_context = _extract_architecture_context(task, design_spec)
+        return _build_task_agent(task, workspace, design_summary, prior_context, architecture_context=architecture_context)
     else:
         return _build_task_single_shot(task, design_summary, llm, prior_context)
 
@@ -357,6 +410,7 @@ def _build_task_single_shot(
 
 def _build_task_agent(
     task: Task, workspace: str, design_summary: str, prior_context: str,
+    architecture_context: str = "",
 ) -> tuple[BuildResult, float]:
     """Multi-turn agent with tools."""
     try:
@@ -373,17 +427,31 @@ def _build_task_agent(
             prior_context=prior_context,
             files_to_create=task.files_to_create,
             files_to_modify=task.files_to_modify,
+            architecture_context=architecture_context,
         )
 
-        # Convert to BuildResult
-        result = BuildResult(
-            task_id=task.id,
-            status="completed",
-            commits=[f"feat: {summary[:100]}"],
-            errors=[],
-            files_written=[FileWrite(path=f["path"], content=f["content"]) for f in files_written],
-        )
-        print(f"    Status: completed (agent), Files: {len(files_written)}, Cost: ${cost:.4f}")
+        # Detect incomplete tasks: agent hit max turns without calling task_complete
+        task_incomplete = "max turns reached" in summary.lower() or summary.startswith("Task incomplete")
+        if task_incomplete:
+            print(f"    [Build] Task {task.id} INCOMPLETE — not committing partial work")
+            result = BuildResult(
+                task_id=task.id,
+                status="failed",
+                commits=[],
+                errors=["Task incomplete — max turns reached without calling task_complete"],
+                files_written=[FileWrite(path=f["path"], content=f["content"]) for f in files_written],
+            )
+            print(f"    Status: failed (agent incomplete), Files: {len(files_written)}, Cost: ${cost:.4f}")
+        else:
+            # Convert to BuildResult
+            result = BuildResult(
+                task_id=task.id,
+                status="completed",
+                commits=[f"feat: {summary[:100]}"],
+                errors=[],
+                files_written=[FileWrite(path=f["path"], content=f["content"]) for f in files_written],
+            )
+            print(f"    Status: completed (agent), Files: {len(files_written)}, Cost: ${cost:.4f}")
         return result, cost
     except Exception as e:
         print(f"    ERROR (agent): {e}")
@@ -396,6 +464,9 @@ def _process_build_result(
 ) -> int:
     """Write files to disk and git commit. Returns count of files written."""
     files_written_count = 0
+    if result.status == "failed":
+        print(f"    [Build] Task {result.task_id} INCOMPLETE — not committing partial work")
+        return 0
     if result.files_written and result.status == "completed":
         written = _write_files_to_disk(result.files_written, workspace, own_files=run_files)
         files_written_count = len(written)
@@ -544,6 +615,23 @@ def builder_node(state: PipelineState) -> dict:
     design_spec_data = state.get("design_spec") or {}
     design_summary = design_spec_data.get("summary", "No design spec available.")
 
+    # Check builder mode: single_shot (default) or agent (multi-turn with tools)
+    builder_mode = os.environ.get("PINEAPPLE_BUILDER", "single_shot")
+    if builder_mode == "agent":
+        print(f"  [Build] Mode: AGENT (multi-turn with tools)")
+    else:
+        print(f"  [Build] Mode: single-shot")
+
+    # Check if architecture-aware orchestration is available
+    raw_architecture = design_spec_data.get("_raw_document", "")
+    if raw_architecture and builder_mode == "agent":
+        try:
+            from pineapple.orchestrator import orchestrate_build
+            print("  [Build] Architecture document found — delegating to orchestrator")
+            return orchestrate_build(state, workspace, manifest_path=state.get("_manifest_path"))
+        except ImportError:
+            print("  [Build] Orchestrator not available, falling back to flat execution")
+
     # Determine if we can use LLM
     use_llm = _HAS_LLM_DEPS and has_any_llm_key()
     llm = None
@@ -556,13 +644,6 @@ def builder_node(state: PipelineState) -> dict:
         llm = get_llm_client(stage="build")
         provider = llm.provider
         print(f"  [Build] Using provider: {provider}")
-
-    # Check builder mode: single_shot (default) or agent (multi-turn with tools)
-    builder_mode = os.environ.get("PINEAPPLE_BUILDER", "single_shot")
-    if builder_mode == "agent":
-        print(f"  [Build] Mode: AGENT (multi-turn with tools)")
-    else:
-        print(f"  [Build] Mode: single-shot")
 
     build_results = []  # type: list[dict]
     total_cost = 0.0
@@ -608,6 +689,7 @@ def builder_node(state: PipelineState) -> dict:
                 task, workspace, design_summary, cumulative_files,
                 review_result, verify_record, run_files, workspace_info,
                 use_llm, llm, builder_mode,
+                design_spec=design_spec_data,
             )
             total_cost += task_cost
             build_results.append(result.model_dump())
@@ -627,6 +709,7 @@ def builder_node(state: PipelineState) -> dict:
                         task, workspace, design_summary, cumulative_files,
                         review_result, verify_record, run_files, workspace_info,
                         use_llm, llm, builder_mode,
+                        design_spec_data,
                     )
                     futures[future] = task
 
