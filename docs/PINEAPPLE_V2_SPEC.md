@@ -2,7 +2,7 @@
 
 > **Version:** 2.0.0-alpha.1
 > **Date:** 2026-03-22
-> **Status:** Phase 1 skeleton implemented, agents functional with LLM fallbacks
+> **Status:** Phase 1 complete, Phase 3 in progress
 > **Source of truth for tool choices:** NOTEBOOKLM_PROMPT.md at D:/ai-agent-mastery-plan/
 
 ---
@@ -48,9 +48,6 @@ pineapple-pipeline/
       shipper.py               # Stage 8
       evolver.py               # Stage 9
     models/                    # Pydantic models for every inter-stage artifact
-    middleware/
-      observability.py         # LangFuse wrapper
-      resilience.py            # Tenacity + PyBreaker wrappers
 ```
 
 ### The Fundamental Difference from v1
@@ -79,9 +76,9 @@ pineapple-pipeline/
 | **Pydantic** | Type system. Every artifact (StrategicBrief, DesignSpec, TaskPlan, CodeReview, VerifyResult) is a Pydantic model |
 | **Instructor** | Wraps every LLM call. No raw string parsing. Every Claude response returns a validated Pydantic model |
 | **Anthropic API** | All LLM calls go through Claude |
-| **Tenacity** | Retry wrapper on every API call. `@retry(stop=stop_after_attempt(3), wait=wait_exponential())` |
-| **PyBreaker** | Circuit breaker on Stage 5-6-7 loop AND on individual API calls |
-| **LangFuse** | Traces every agent call. Cost per stage, per project. The nervous system |
+| **Tenacity** | Transitive dependency only — used internally by Instructor and Google GenAI. Direct retry handled by `call_with_retry()` in llm.py, which delegates to native SDK retry (Anthropic `max_retries`, Google GenAI built-in) |
+| **PyBreaker** | Removed — `review_gate` uses a simple attempt counter (`attempt_counts["build"] >= 3`) |
+| **LangFuse** | Traces every agent call. Cost per stage, per project. The nervous system. Wired with graceful degradation (no-ops if server unreachable) |
 | **FastMCP** | Exposes pipeline stages as MCP tools. Claude Code integration point |
 | **pytest** | Stage 6 Layers 1-3 (unit, integration, adversarial) |
 
@@ -176,11 +173,11 @@ LangGraph `interrupt_before` on Stages 1, 2, 3, 8. Pipeline pauses, CLI prompts 
 
 ## Phased Build Plan
 
-### Phase 1 (Week 1-2): Core Pipeline — 11 tools, no external services
+### Phase 1 (Week 1-2): Core Pipeline — COMPLETE
 
-**Tools:** LangGraph, Pydantic, Anthropic API, Instructor, Tenacity, PyBreaker, LangFuse (optional/graceful-degrade), pytest, DeepEval, FastMCP, Docker (optional)
+**Tools:** LangGraph, Pydantic, Anthropic API, Instructor, LangFuse (graceful-degrade), pytest, FastMCP, Docker (optional)
 
-**Deliverable:** `pineapple run "Build X"` works end-to-end. All 10 stages execute. SQLite checkpointing. Resume works. Human-in-the-loop gates work. Stage 6 runs pytest + DeepEval.
+**Deliverable:** `pineapple run "Build X"` works end-to-end. All 10 stages execute. SQLite checkpointing. Resume works. Human-in-the-loop gates work. CLI feedback path (`n` at gate collects feedback text). Per-branch verify records at `.pineapple/verify/<branch>.json`.
 
 **Tasks:**
 1. Define all Pydantic models (state, artifacts, errors)
@@ -197,18 +194,21 @@ LangGraph `interrupt_before` on Stages 1, 2, 3, 8. Pipeline pauses, CLI prompts 
 
 ### Phase 2 (Week 3-4): Observability + Caching
 
-**Add:** LangFuse (full), Redis, Tenacity tuning
-**Deliverable:** Real traces, cost dashboards, LLM response caching, Redis checkpoint store
+**Add:** LangFuse (full tracing already wired), Redis (requires Redis infrastructure)
+**Deliverable:** Full cost dashboards. Redis checkpoint store (replaces SQLite) and LLM response caching once Redis is available.
+**Notes:** LangFuse already wired with graceful degradation. Redis and any Tenacity-tuning items are stale — SDK retry is native. Redis items blocked on infrastructure provisioning.
 
-### Phase 3 (Week 5-6): Real Verification
+### Phase 3 (Week 5-6): Real Verification — IN PROGRESS
 
-**Add:** DeepEval (full metrics suite), RAGAS, PromptFoo, PyBreaker tuning
+**Add:** DeepEval (full metrics suite, in progress), PromptFoo (in progress), RAGAS (RAG projects only)
 **Deliverable:** Stage 6 has real quality gates with thresholds. Prompt regression testing.
+**Notes:** PyBreaker tuning is stale — removed entirely. RAGAS only needed when the target project uses RAG; not a general pipeline dependency.
 
 ### Phase 4 (Week 7-8): Evolution + Deploy
 
-**Add:** Mem0, Neo4j, ChromaDB, DSPy, GitHub Actions, Railway
+**Add:** Mem0 (requires Mem0 server), Neo4j (requires Neo4j server), ChromaDB (requires ChromaDB server), DSPy, GitHub Actions (in progress), Railway
 **Deliverable:** Pipeline learns from itself. Target projects deploy to cloud.
+**Notes:** Mem0, Neo4j, ChromaDB, and DSPy all require external services to be provisioned before integration. GitHub Actions CI workflow being added now.
 
 Each phase is independently shippable. Phase 1 alone = working agentic pipeline.
 
@@ -246,15 +246,20 @@ User runs: `pineapple run "Build BrokerFlow Portal Pre-Fill browser extension"`
 | Dogfood report | `D:\GitHub\pineapple-pipeline\DOGFOOD_REPORT.md` | REFERENCE |
 | Design spec (process layer) | `docs/superpowers/specs/2026-03-15-pineapple-pipeline-design.md` | KEEP process, REWRITE impl |
 
-## What Gets Killed
+## What Was Killed (Completed)
 
-| Custom Code | Replace With |
-|------------|-------------|
-| `pipeline_state.py` (304 lines) | LangGraph state + checkpointing |
-| Custom retry counters | Tenacity |
-| `resilience.py` template (216 lines) | PyBreaker |
-| Raw HTTP stubs for Mem0/Neo4j | Mem0 SDK, Neo4j driver |
-| Manual cost tracking | LangFuse |
+| Custom Code | Replace With | Status |
+|------------|-------------|--------|
+| `pipeline_state.py` (304 lines) | LangGraph state + checkpointing | DONE |
+| Custom retry counters | Native SDK retry (`max_retries`) + `call_with_retry()` in llm.py | DONE |
+| `resilience.py` template (216 lines) | Simple attempt counter in `review_gate` | DONE |
+| Raw HTTP stubs for Mem0/Neo4j | Mem0 SDK, Neo4j driver (Phase 4) | DONE |
+| Manual cost tracking | LangFuse (wired) | DONE |
+| `middleware/` package (observability.py, resilience.py) | Deleted — empty placeholder | DONE |
+| `templates/` directory | Deleted — wrong repo for project scaffolding | DONE |
+| v1 tools (pipeline_state.py, pipeline_tracer.py, pineapple_audit.py, pineapple_cleanup.py, pineapple_evolve.py, pineapple_config.py, apply_pipeline.py, pineapple_upgrade.py) | Deleted | DONE |
+| `tests/v1/` | Deleted | DONE |
+| `requirements.txt` | pyproject.toml is canonical | DONE |
 
 ---
 
@@ -350,7 +355,11 @@ The skeleton pipeline orchestrates building its own nodes:
 | src/pineapple/mcp_server.py | YES | 4 FastMCP tools |
 | src/pineapple/models/__init__.py | YES | All 13 Pydantic models |
 | src/pineapple/agents/*.py | YES | All 10 stage agents implemented |
-| pyproject.toml | YES | LangGraph, Pydantic, Tenacity, PyBreaker in deps |
+| pyproject.toml | YES | LangGraph, Pydantic in deps. Tenacity and PyBreaker removed as direct deps — retry delegated to native SDKs |
+| src/pineapple/gates.py | YES | Circuit breaker replaced with simple attempt counter; `review_gate` uses `attempt_counts` |
+| CHANGELOG.md | YES | Populated with version history |
+| WASTAGE_AUDIT.md | YES | Documents all cleanup performed (deleted files, removed deps) |
+| .github/workflows/ | IN PROGRESS | GitHub Actions CI being added (Phase 4) |
 
 ### Anti-Patterns from Dogfood (Non-Negotiable)
 

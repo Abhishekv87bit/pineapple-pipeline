@@ -296,6 +296,110 @@ def _run_code_quality(workspace: Optional[str] = None) -> LayerResult:
     )
 
 
+def _run_deepeval(
+    workspace: Optional[str] = None,
+    build_results: list = None,
+    design_spec: dict = None,
+) -> LayerResult:
+    """Layer 7: LLM quality evaluation via DeepEval."""
+    try:
+        from deepeval.metrics import GEval, FaithfulnessMetric
+        from deepeval.test_case import LLMTestCase, LLMTestCaseParams
+    except ImportError:
+        return LayerResult(
+            layer=7,
+            name="deepeval_quality",
+            status="skip",
+            details="deepeval not installed. Install with: pip install 'pineapple-pipeline[eval]'",
+        )
+
+    if not build_results or not design_spec:
+        return LayerResult(
+            layer=7,
+            name="deepeval_quality",
+            status="skip",
+            details="No build results or design spec available for quality evaluation",
+        )
+
+    # Build the test case from pipeline artifacts
+    spec_summary = design_spec.get("summary", "No design spec summary")
+    code_output = "\n".join(
+        str(r.get("files_written", [])) for r in build_results if isinstance(r, dict)
+    )[:5000]  # Cap at 5k chars
+
+    if not code_output.strip() or code_output.strip() == "[]":
+        return LayerResult(
+            layer=7,
+            name="deepeval_quality",
+            status="skip",
+            details="No code output in build results to evaluate",
+        )
+
+    test_case = LLMTestCase(
+        input=f"Implement the following design:\n{spec_summary}",
+        actual_output=code_output,
+        expected_output=spec_summary,
+        retrieval_context=[spec_summary],
+    )
+
+    scores = {}
+    failures = []
+
+    # GEval: general quality
+    try:
+        geval = GEval(
+            name="code_implements_spec",
+            criteria="Does the generated code correctly implement the design specification? Consider completeness, correctness, and adherence to the spec.",
+            evaluation_params=[
+                LLMTestCaseParams.INPUT,
+                LLMTestCaseParams.ACTUAL_OUTPUT,
+                LLMTestCaseParams.EXPECTED_OUTPUT,
+            ],
+            threshold=0.7,
+        )
+        geval.measure(test_case)
+        scores["geval"] = geval.score
+        if geval.score < 0.7:
+            failures.append(f"GEval score {geval.score:.2f} < 0.7 threshold")
+    except Exception as exc:
+        scores["geval"] = None
+        failures.append(f"GEval failed: {exc}")
+
+    # Faithfulness: no hallucinated features
+    try:
+        faithfulness = FaithfulnessMetric(threshold=0.7)
+        faithfulness.measure(test_case)
+        scores["faithfulness"] = faithfulness.score
+        if faithfulness.score < 0.7:
+            failures.append(f"Faithfulness score {faithfulness.score:.2f} < 0.7 threshold")
+    except Exception as exc:
+        scores["faithfulness"] = None
+        failures.append(f"Faithfulness failed: {exc}")
+
+    score_summary = ", ".join(
+        f"{k}={v:.2f}" if v is not None else f"{k}=N/A"
+        for k, v in scores.items()
+    )
+
+    if failures:
+        return LayerResult(
+            layer=7,
+            name="deepeval_quality",
+            status="fail",
+            details=f"Quality gates failed: {'; '.join(failures)}. Scores: {score_summary}",
+            test_count=len(scores),
+            fail_count=len(failures),
+        )
+
+    return LayerResult(
+        layer=7,
+        name="deepeval_quality",
+        status="pass",
+        details=f"All quality gates passed. Scores: {score_summary}",
+        test_count=len(scores),
+    )
+
+
 def _run_domain_validation(workspace: Optional[str] = None) -> LayerResult:
     """Layer 6: Domain-specific validation for Pineapple Pipeline."""
     cwd = Path(workspace) if workspace else Path.cwd()
@@ -453,6 +557,7 @@ def verifier_node(state: PipelineState) -> dict:
     4. Security scan (bandit + pattern matching)
     5. Code quality (ruff / flake8)
     6. Domain validation (import smoke tests, anti-pattern detection)
+    7. LLM quality evaluation (DeepEval GEval + Faithfulness)
     """
     project_name = state.get("project_name", "unknown")
     print(f"[Stage 6: Verify] Project: {project_name}")
@@ -484,6 +589,18 @@ def verifier_node(state: PipelineState) -> dict:
         result = runner(workspace=workspace)
         layers.append(result)
         print(f"    Result: {result.status} — {result.details[:80]}")
+
+    # Layer 7: DeepEval quality evaluation (needs state artifacts)
+    print("  [Verify] Layer 7: LLM quality evaluation...")
+    build_results_data = state.get("build_results", [])
+    design_spec_data = state.get("design_spec") or {}
+    deepeval_result = _run_deepeval(
+        workspace=workspace,
+        build_results=build_results_data,
+        design_spec=design_spec_data,
+    )
+    layers.append(deepeval_result)
+    print(f"    Result: {deepeval_result.status} — {deepeval_result.details[:80]}")
 
     # Determine overall status: pass/skip = green, fail = red
     all_green = all(lr.status in ("pass", "skip") for lr in layers)

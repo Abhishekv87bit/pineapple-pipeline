@@ -1,0 +1,71 @@
+# PromptFoo configuration for Pineapple Pipeline prompt regression testing
+# Run: npx promptfoo eval
+# View: npx promptfoo view
+
+description: "Pineapple Pipeline - Prompt Regression Tests"
+
+providers:
+  # Uses the same providers as the pipeline (reads from env vars)
+  - id: google:gemini-2.5-flash
+    config:
+      apiKey: "{{GOOGLE_API_KEY}}"
+
+prompts:
+  - file://prompts/strategic_review.txt
+  - file://prompts/architecture.txt
+  - file://prompts/planner.txt
+  - file://prompts/reviewer.txt
+
+tests:
+  # Strategic Review: should produce structured brief from a request
+  - vars:
+      request: "Build a REST API for a todo app with user authentication"
+      context_files: "None"
+      project_type: "python"
+    assert:
+      - type: contains
+        value: "what"
+      - type: contains
+        value: "why"
+      - type: llm-rubric
+        value: "The response should contain a strategic analysis with clear scope definition, not just echo the request back"
+      - type: not-contains
+        value: "error"
+
+  # Architecture: should produce component breakdown
+  - vars:
+      what: "REST API for todo app with auth"
+      why: "Learning project with production patterns"
+      not_building: '["mobile app", "frontend"]'
+      who_benefits: "developers learning API design"
+      assumptions: '["Python 3.12", "PostgreSQL"]'
+      open_questions: '["Deploy target?"]'
+      project_name: "todo-api"
+      project_type: "python"
+      request: "Build a todo API"
+      codebase_summary: "No existing codebase."
+      locked_decisions: "No locked decisions."
+    assert:
+      - type: llm-rubric
+        value: "The response should contain specific component names and technology choices, not vague hand-waving"
+      - type: not-contains
+        value: "error"
+
+  # Planner: should produce ordered tasks
+  - vars:
+      design_spec_json: '{"title": "Todo API", "summary": "FastAPI REST API", "components": [{"name": "api", "description": "REST endpoints"}]}'
+      strategic_brief_json: '{"what": "Todo API", "why": "Learning"}'
+      project_name: "todo-api"
+      request: "Build a todo API"
+    assert:
+      - type: llm-rubric
+        value: "The response should contain ordered implementation tasks with IDs, descriptions, and file paths"
+
+  # Reviewer: should produce verdict with categorized issues
+  - vars:
+      design_spec: "FastAPI REST API with auth middleware and CRUD endpoints"
+      build_results: "Created api.py with 3 endpoints, auth.py with JWT middleware"
+      verify_record: "All tests pass, no security issues"
+    assert:
+      - type: llm-rubric
+        value: "The response should contain a clear verdict (pass/retry/fail) and categorized issues"
