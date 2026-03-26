@@ -5,25 +5,7 @@ No LLM calls. No side effects. Just deterministic logic.
 """
 import os
 
-import pybreaker
-
 from pineapple.state import PipelineState
-
-# ---------------------------------------------------------------------------
-# Circuit breaker for the build-verify-review loop (Stages 5-6-7).
-# Opens after 3 consecutive failures, forcing human intervention.
-# reset_timeout=60 allows automatic retry after 60 s (half-open state).
-# ---------------------------------------------------------------------------
-build_loop_breaker = pybreaker.CircuitBreaker(
-    fail_max=3,
-    reset_timeout=60,
-    name="build_loop_breaker",
-)
-
-
-class BuildCycleFailure(Exception):
-    """Raised when a build-verify-review cycle has critical issues."""
-
 
 # ---------------------------------------------------------------------------
 # Routing gates (return a string label for conditional edges)
@@ -47,58 +29,30 @@ def route_by_path(state: PipelineState) -> str:
     return mapping.get(path, "strategic_review")
 
 
-def _check_review_cycle(state: PipelineState) -> str:
-    """Inner check wrapped by the circuit breaker.
-
-    Returns "pass" or "retry". Raises BuildCycleFailure on critical issues
-    so PyBreaker can track the failure.
-    """
-    review_result: dict | None = state.get("review_result")
-    if review_result is not None:
-        issues = review_result.get("critical_issues", [])
-        if issues:
-            raise BuildCycleFailure(f"{len(issues)} critical issue(s) found")
-    return "pass"
-
-
 def review_gate(state: PipelineState, max_attempts: int = 5) -> str:
     """Decide what happens after the review stage.
-
-    Uses a DUAL protection strategy:
-    1. Hard ceiling on total build attempts (catches alternating pass/fail)
-    2. PyBreaker circuit breaker (catches consecutive failures)
-
-    Args:
-        max_attempts: Absolute maximum build attempts regardless of PyBreaker
-                      state. Default 5 (higher than PyBreaker's fail_max=3
-                      since PyBreaker already handles consecutive failures).
 
     Returns:
         "pass"  -> proceed to ship
         "retry" -> loop back to build
         "fail"  -> escalate to human intervention
     """
-    # Hard ceiling: absolute max attempts regardless of PyBreaker state.
-    # This prevents infinite loops when the reviewer alternates between
-    # pass and fail (which resets PyBreaker's consecutive failure counter).
+    # Hard ceiling on total build attempts
     attempt_counts = state.get("attempt_counts", {})
     if attempt_counts.get("build", 0) >= max_attempts:
         return "fail"
 
-    # Cost ceiling (independent of circuit breaker)
+    # Cost ceiling
     if state.get("cost_total_usd", 0.0) > float(os.environ.get("PINEAPPLE_COST_CEILING", "200.0")):
         return "fail"
 
-    # PyBreaker handles consecutive failures (opens after 3 in a row)
-    try:
-        result = build_loop_breaker.call(_check_review_cycle, state)
-        return result
-    except pybreaker.CircuitBreakerError:
-        # Breaker is open -- too many consecutive failures
-        return "fail"
-    except BuildCycleFailure:
-        # Review found critical issues, breaker recorded the failure
-        return "retry"
+    # Check review result for critical issues
+    review_result = state.get("review_result")
+    if review_result is not None:
+        if review_result.get("critical_issues", []):
+            return "retry"
+
+    return "pass"
 
 
 # ---------------------------------------------------------------------------

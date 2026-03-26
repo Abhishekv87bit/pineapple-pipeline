@@ -18,8 +18,7 @@ _HAS_LLM_DEPS = True
 _IMPORT_ERROR: str | None = None
 
 try:
-    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES, estimate_cost, _extract_usage, flush_traces
-    from tenacity import retry, stop_after_attempt, wait_exponential
+    from pineapple.llm import call_with_retry, has_any_llm_key
 except ImportError as exc:
     _HAS_LLM_DEPS = False
     _IMPORT_ERROR = str(exc)
@@ -102,21 +101,13 @@ def _call_llm(system: str, user: str) -> tuple[StrategicBrief, str, float]:
     Uses real token counts from the response when available, otherwise
     falls back to flat cost estimates.
     """
-    llm = get_llm_client(stage="strategic_review")
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=30))
-    def _inner() -> StrategicBrief:
-        return llm.create(
-            response_model=StrategicBrief,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=_MAX_TOKENS,
-        )
-
-    result = _inner()
-    usage = _extract_usage(result, llm.provider)
-    cost = estimate_cost(llm.provider, usage)
-    return result, llm.provider, cost
+    return call_with_retry(
+        stage="strategic_review",
+        response_model=StrategicBrief,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        max_tokens=_MAX_TOKENS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -202,9 +193,6 @@ def strategic_review_node(state: PipelineState) -> dict:
         print(f"    Who benefits: {brief.who_benefits}")
         print(f"    Assumptions: {len(brief.assumptions)} items")
         print(f"    Open questions: {len(brief.open_questions)} items")
-
-        # Flush LangFuse traces before returning
-        flush_traces()
 
         return {
             "current_stage": "strategic_review",

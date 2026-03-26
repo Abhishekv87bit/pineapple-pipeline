@@ -28,8 +28,7 @@ _HAS_LLM_DEPS = True
 _IMPORT_ERROR: str | None = None
 
 try:
-    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES, estimate_cost, _extract_usage, flush_traces
-    from tenacity import retry, stop_after_attempt, wait_exponential
+    from pineapple.llm import call_with_retry, has_any_llm_key
 except ImportError as exc:
     _HAS_LLM_DEPS = False
     _IMPORT_ERROR = str(exc)
@@ -222,8 +221,6 @@ def _call_llm(design_spec: str, build_results: str, verify_record: str, is_light
     Uses real token counts from the response when available, otherwise
     falls back to flat cost estimates.
     """
-    llm = get_llm_client(stage="review")
-
     system = _SYSTEM_PROMPT
     if is_lightweight:
         system += (
@@ -233,23 +230,17 @@ def _call_llm(design_spec: str, build_results: str, verify_record: str, is_light
             "Only flag genuine implementation errors as critical."
         )
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=30))
-    def _inner() -> ReviewResult:
-        return llm.create(
-            response_model=ReviewResult,
-            system=system,
-            messages=[{"role": "user", "content": _USER_PROMPT_TEMPLATE.format(
-                design_spec=design_spec,
-                build_results=build_results,
-                verify_record=verify_record,
-            )}],
-            max_tokens=_MAX_TOKENS,
-        )
-
-    result = _inner()
-    usage = _extract_usage(result, llm.provider)
-    cost = estimate_cost(llm.provider, usage)
-    return result, llm.provider, cost
+    return call_with_retry(
+        stage="review",
+        response_model=ReviewResult,
+        system=system,
+        messages=[{"role": "user", "content": _USER_PROMPT_TEMPLATE.format(
+            design_spec=design_spec,
+            build_results=build_results,
+            verify_record=verify_record,
+        )}],
+        max_tokens=_MAX_TOKENS,
+    )
 
 
 def _call_llm_chunk(
@@ -261,8 +252,6 @@ def _call_llm_chunk(
     is_lightweight: bool = False,
 ) -> tuple[ReviewResult, str, float]:
     """Call the LLM for a single chunk/module review."""
-    llm = get_llm_client(stage="review")
-
     system = _CHUNK_SYSTEM_PROMPT.format(module_name=module_name)
     if is_lightweight:
         system += (
@@ -272,25 +261,19 @@ def _call_llm_chunk(
             "Only flag genuine implementation errors as critical."
         )
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=30))
-    def _inner() -> ReviewResult:
-        return llm.create(
-            response_model=ReviewResult,
-            system=system,
-            messages=[{"role": "user", "content": _CHUNK_USER_PROMPT_TEMPLATE.format(
-                module_name=module_name,
-                file_list=", ".join(file_list),
-                design_spec=design_spec,
-                build_results=build_results,
-                verify_record=verify_record,
-            )}],
-            max_tokens=_MAX_TOKENS,
-        )
-
-    result = _inner()
-    usage = _extract_usage(result, llm.provider)
-    cost = estimate_cost(llm.provider, usage)
-    return result, llm.provider, cost
+    return call_with_retry(
+        stage="review",
+        response_model=ReviewResult,
+        system=system,
+        messages=[{"role": "user", "content": _CHUNK_USER_PROMPT_TEMPLATE.format(
+            module_name=module_name,
+            file_list=", ".join(file_list),
+            design_spec=design_spec,
+            build_results=build_results,
+            verify_record=verify_record,
+        )}],
+        max_tokens=_MAX_TOKENS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -483,9 +466,6 @@ def reviewer_node(state: PipelineState) -> dict:
             print(f"    Critical: {len(result.critical_issues)}")
             print(f"    Important: {len(result.important_issues)}")
             print(f"    Minor: {len(result.minor_issues)}")
-
-            # Flush LangFuse traces before returning
-            flush_traces()
 
             return {
                 "current_stage": "review",

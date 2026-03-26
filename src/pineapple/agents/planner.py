@@ -19,8 +19,7 @@ _HAS_LLM_DEPS = True
 _IMPORT_ERROR: str | None = None
 
 try:
-    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES, estimate_cost, _extract_usage, flush_traces
-    from tenacity import retry, stop_after_attempt, wait_exponential
+    from pineapple.llm import call_with_retry, has_any_llm_key
 except ImportError as exc:
     _HAS_LLM_DEPS = False
     _IMPORT_ERROR = str(exc)
@@ -115,21 +114,13 @@ def _call_llm(system: str, user: str) -> tuple[TaskPlan, str, float]:
     Uses real token counts from the response when available, otherwise
     falls back to flat cost estimates.
     """
-    llm = get_llm_client(stage="plan")
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=30))
-    def _inner() -> TaskPlan:
-        return llm.create(
-            response_model=TaskPlan,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=_MAX_TOKENS,
-        )
-
-    result = _inner()
-    usage = _extract_usage(result, llm.provider)
-    cost = estimate_cost(llm.provider, usage)
-    return result, llm.provider, cost
+    return call_with_retry(
+        stage="plan",
+        response_model=TaskPlan,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        max_tokens=_MAX_TOKENS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -222,9 +213,6 @@ def plan_node(state: PipelineState) -> dict:
         for task in plan.tasks:
             print(f"    - {task.id}: {task.description} [{task.complexity}] ${task.estimated_cost_usd:.2f}")
         print(f"    Total estimated cost: ${plan.total_estimated_cost_usd:.2f}")
-
-        # Flush LangFuse traces before returning
-        flush_traces()
 
         return {
             "current_stage": "plan",

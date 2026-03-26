@@ -19,8 +19,7 @@ _HAS_LLM_DEPS = True
 _IMPORT_ERROR = None  # type: str | None
 
 try:
-    from pineapple.llm import get_llm_client, has_any_llm_key, COST_ESTIMATES, estimate_cost, _extract_usage, flush_traces
-    from tenacity import retry, stop_after_attempt, wait_exponential
+    from pineapple.llm import call_with_retry, get_llm_client, has_any_llm_key, flush_traces
 except ImportError as exc:
     _HAS_LLM_DEPS = False
     _IMPORT_ERROR = str(exc)
@@ -184,32 +183,27 @@ def _call_llm_for_task(task: Task, design_summary: str, llm=None, prior_context:
     when available, otherwise falls back to flat cost estimates.
 
     Args:
+        llm: Optional pre-created LLMClient to reuse across tasks. If None,
+             a new client is created for this call.
         prior_context: Summary of files written by earlier tasks in this run,
                        so the LLM knows what already exists.
     """
-    if llm is None:
-        llm = get_llm_client(stage="build")
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=30))
-    def _inner() -> BuildResult:
-        return llm.create(
-            response_model=BuildResult,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _USER_PROMPT_TEMPLATE.format(
-                task_id=task.id,
-                description=task.description,
-                files_to_create=task.files_to_create or "None",
-                files_to_modify=task.files_to_modify or "None",
-                complexity=task.complexity,
-                design_summary=design_summary,
-                prior_context=prior_context,
-            )}],
-            max_tokens=_MAX_TOKENS,
-        )
-
-    result = _inner()
-    usage = _extract_usage(result, llm.provider)
-    cost = estimate_cost(llm.provider, usage)
+    result, _provider, cost = call_with_retry(
+        stage="build",
+        response_model=BuildResult,
+        system=_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": _USER_PROMPT_TEMPLATE.format(
+            task_id=task.id,
+            description=task.description,
+            files_to_create=task.files_to_create or "None",
+            files_to_modify=task.files_to_modify or "None",
+            complexity=task.complexity,
+            design_summary=design_summary,
+            prior_context=prior_context,
+        )}],
+        max_tokens=_MAX_TOKENS,
+        client=llm,
+    )
     return result, cost
 
 

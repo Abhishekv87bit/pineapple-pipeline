@@ -1,6 +1,6 @@
 """Integration tests verifying 3rd-party libraries work correctly.
 
-Tests real behavior of: PyBreaker, Tenacity, Instructor, LangGraph, Pydantic.
+Tests real behavior of: Instructor, LangGraph, Pydantic, and the LLM call pipeline.
 """
 import os
 import sqlite3
@@ -8,13 +8,10 @@ import tempfile
 import time
 from unittest.mock import MagicMock, patch
 
-import pybreaker
 import pytest
 from pydantic import ValidationError
 
 from pineapple.gates import (
-    BuildCycleFailure,
-    build_loop_breaker,
     review_gate,
     route_by_path,
 )
@@ -39,11 +36,6 @@ from pineapple.models import (
 # ============================================================================
 # Helpers
 # ============================================================================
-
-
-def _reset_breaker():
-    """Force the circuit breaker back to CLOSED state."""
-    build_loop_breaker.close()
 
 
 def _make_state(**overrides) -> dict:
@@ -75,122 +67,49 @@ def _make_state(**overrides) -> dict:
     return base
 
 # ============================================================================
-# 1. PyBreaker (gates.py)
+# 1. review_gate (gates.py)
 # ============================================================================
 
 
-class TestPyBreakerIntegration:
-    """Verify PyBreaker circuit breaker tracks failures and opens correctly."""
+class TestReviewGate:
+    """Verify review_gate routing logic."""
 
-    def setup_method(self):
-        _reset_breaker()
+    def test_pass_when_no_critical_issues(self):
+        state = _make_state(review_result={"critical_issues": []})
+        assert review_gate(state) == "pass"
 
-    def teardown_method(self):
-        _reset_breaker()
+    def test_retry_when_critical_issues(self):
+        state = _make_state(review_result={"critical_issues": ["bug"]})
+        assert review_gate(state) == "retry"
 
-    def test_breaker_starts_closed(self):
-        """Breaker should start in CLOSED state."""
-        assert build_loop_breaker.current_state == "closed"
-
-    def test_three_critical_failures_opens_breaker(self):
-        """3 consecutive critical failures should open the breaker."""
-        state_with_issues = _make_state(
-            review_result={"critical_issues": ["bug1", "bug2"]}
+    def test_fail_when_max_attempts_reached(self):
+        state = _make_state(
+            attempt_counts={"build": 5},
+            review_result={"critical_issues": ["bug"]},
         )
+        assert review_gate(state) == "fail"
 
-        results = []
-        for _ in range(3):
-            result = review_gate(state_with_issues)
-            results.append(result)
-
-        # First 3 calls: breaker records failures but returns retry
-        assert results[0] == "retry"
-        assert results[1] == "retry"
-        assert results[2] == "fail"
-
-        # After 3 failures, breaker is now OPEN
-        assert build_loop_breaker.current_state == "open"
-
-        # 4th call should return fail because breaker is open
-        result = review_gate(state_with_issues)
-        assert result == "fail"
-
-    def test_passing_state_after_failures_succeeds(self):
-        """After breaker resets (half-open), a passing state should close it."""
-        state_with_issues = _make_state(
-            review_result={"critical_issues": ["bug"]}
-        )
-        passing_state = _make_state(
-            review_result={"critical_issues": []}
-        )
-
-        # Trip the breaker with 3 failures
-        for _ in range(3):
-            review_gate(state_with_issues)
-
-        assert build_loop_breaker.current_state == "open"
-
-        # Manually force half-open (simulating timeout expiry)
-        build_loop_breaker.half_open()
-        assert build_loop_breaker.current_state == "half-open"
-
-        # Passing call should succeed and close the breaker
-        result = review_gate(passing_state)
-        assert result == "pass"
-        assert build_loop_breaker.current_state == "closed"
-
-    def test_breaker_state_transitions(self):
-        """Verify full lifecycle: closed -> open -> half-open -> closed."""
-        state_with_issues = _make_state(
-            review_result={"critical_issues": ["bug"]}
-        )
-        passing_state = _make_state(review_result={})
-
-        assert build_loop_breaker.current_state == "closed"
-
-        for _ in range(3):
-            review_gate(state_with_issues)
-        assert build_loop_breaker.current_state == "open"
-
-        build_loop_breaker.half_open()
-        assert build_loop_breaker.current_state == "half-open"
-
-        result = review_gate(passing_state)
-        assert result == "pass"
-        assert build_loop_breaker.current_state == "closed"
-
-    def test_cost_ceiling_independent_of_breaker(self):
-        """Cost ceiling (200 USD) should trigger fail regardless of breaker state."""
-        _reset_breaker()
-        assert build_loop_breaker.current_state == "closed"
-
-        state_over_budget = _make_state(
+    def test_fail_when_cost_exceeded(self):
+        state = _make_state(
             cost_total_usd=201.0,
             review_result={"critical_issues": []},
         )
+        assert review_gate(state) == "fail"
 
-        result = review_gate(state_over_budget)
-        assert result == "fail"
+    def test_cost_at_ceiling_passes(self):
+        state = _make_state(cost_total_usd=200.0, review_result={})
+        assert review_gate(state) == "pass"
 
-        # Breaker should still be closed -- cost gate fires first
-        assert build_loop_breaker.current_state == "closed"
+    def test_pass_when_no_review_result(self):
+        state = _make_state(review_result=None)
+        assert review_gate(state) == "pass"
 
-    def test_cost_exactly_at_ceiling_passes(self):
-        """Cost at exactly 200 should pass (> 200 is the threshold)."""
-        state_at_limit = _make_state(
-            cost_total_usd=200.0,
-            review_result={},
+    def test_custom_max_attempts(self):
+        state = _make_state(
+            attempt_counts={"build": 3},
+            review_result={"critical_issues": ["bug"]},
         )
-        result = review_gate(state_at_limit)
-        assert result == "pass"
-
-    def test_breaker_fail_max_is_three(self):
-        """Verify the breaker is configured with fail_max=3."""
-        assert build_loop_breaker.fail_max == 3
-
-    def test_breaker_reset_timeout_is_sixty(self):
-        """Verify the breaker reset_timeout is 60 seconds."""
-        assert build_loop_breaker.reset_timeout == 60
+        assert review_gate(state, max_attempts=3) == "fail"
 
 
 # ============================================================================
@@ -198,16 +117,16 @@ class TestPyBreakerIntegration:
 # ============================================================================
 
 
-class TestTenacityIntegration:
-    """Verify Tenacity retry logic works with the strategic review agent."""
+class TestLLMCallIntegration:
+    """Verify LLM call routing, cost tracking, and error handling."""
 
-    def test_retry_succeeds_after_two_failures(self):
-        """Mock LLM to fail twice then succeed -- Tenacity should retry 3 times."""
-        from pineapple.agents.strategic_review import _call_llm
+    def test_call_with_retry_returns_cost_tuple(self):
+        """call_with_retry should return (result, provider, cost_usd)."""
+        from pineapple.llm import call_with_retry
 
         mock_brief = StrategicBrief(
             what="Test project",
-            why="Testing retries",
+            why="Testing",
             not_building=["nothing"],
             who_benefits="testers",
             assumptions=["works"],
@@ -215,51 +134,44 @@ class TestTenacityIntegration:
             approved=False,
         )
 
-        call_count = 0
-
-        def side_effect(**kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count < 3:
-                raise Exception(f"Transient failure #{call_count}")
-            return mock_brief
-
         mock_client = MagicMock()
         mock_client.provider = "gemini"
-        mock_client.create = MagicMock(side_effect=side_effect)
+        mock_client.create = MagicMock(return_value=mock_brief)
 
-        with patch("pineapple.agents.strategic_review.get_llm_client", return_value=mock_client):
-            brief, provider, cost = _call_llm("system prompt", "user prompt")
+        with patch("pineapple.llm.get_llm_client", return_value=mock_client):
+            result, provider, cost = call_with_retry(
+                stage="strategic_review",
+                response_model=StrategicBrief,
+                system="system",
+                messages=[{"role": "user", "content": "test"}],
+            )
 
-        assert call_count == 3
-        assert brief.what == "Test project"
+        assert result.what == "Test project"
         assert provider == "gemini"
         assert isinstance(cost, float)
 
-    def test_retry_exhausted_after_three_failures(self):
-        """Mock LLM to fail 4 times -- Tenacity should stop after 3 and raise."""
-        from pineapple.agents.strategic_review import _call_llm
-
-        call_count = 0
-
-        def side_effect(**kwargs):
-            nonlocal call_count
-            call_count += 1
-            raise Exception(f"Persistent failure #{call_count}")
+    def test_max_retries_passed_to_instructor(self):
+        """call_with_retry should pass max_retries through to llm.create()."""
+        from pineapple.llm import call_with_retry
 
         mock_client = MagicMock()
-        mock_client.provider = "claude"
-        mock_client.create = MagicMock(side_effect=side_effect)
+        mock_client.provider = "gemini"
+        mock_client.create = MagicMock(return_value=MagicMock())
 
-        with patch("pineapple.agents.strategic_review.get_llm_client", return_value=mock_client):
-            with pytest.raises(Exception):
-                _call_llm("system prompt", "user prompt")
+        with patch("pineapple.llm.get_llm_client", return_value=mock_client):
+            call_with_retry(
+                stage="strategic_review",
+                response_model=StrategicBrief,
+                system="system",
+                messages=[{"role": "user", "content": "test"}],
+                max_retries=5,
+            )
 
-        # Tenacity should have retried exactly 3 times
-        assert call_count == 3
+        call_kwargs = mock_client.create.call_args
+        assert call_kwargs.kwargs.get("max_retries") == 5
 
-    def test_fallback_path_on_failure(self):
-        """When retries exhausted, strategic_review_node should produce error brief."""
+    def test_failure_propagates_to_node(self):
+        """When LLM call fails, strategic_review_node should produce error brief."""
         from pineapple.agents.strategic_review import strategic_review_node
 
         def side_effect(**kwargs):
@@ -274,30 +186,36 @@ class TestTenacityIntegration:
         with (
             patch("pineapple.agents.strategic_review._HAS_LLM_DEPS", True),
             patch("pineapple.agents.strategic_review.has_any_llm_key", return_value=True),
-            patch("pineapple.agents.strategic_review.get_llm_client", return_value=mock_client),
+            patch("pineapple.llm.get_llm_client", return_value=mock_client),
         ):
             result = strategic_review_node(state)
 
-        # Should produce an error brief, not crash
         assert result["current_stage"] == "strategic_review"
         assert result["strategic_brief"] is not None
         brief = result["strategic_brief"]
         assert "error" in brief["what"].lower() or "fail" in brief["what"].lower()
         assert len(result.get("errors", [])) > 0
 
-    def test_tenacity_backoff_config(self):
-        """Verify the retry decorator uses exponential backoff with min=1, max=30."""
-        from tenacity import retry, stop_after_attempt, wait_exponential
+    def test_client_reuse_via_parameter(self):
+        """call_with_retry should use provided client instead of creating one."""
+        from pineapple.llm import call_with_retry
 
-        @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=30))
-        def dummy():
-            pass
+        mock_client = MagicMock()
+        mock_client.provider = "claude"
+        mock_client.create = MagicMock(return_value=MagicMock())
 
-        retrying = dummy.retry
+        with patch("pineapple.llm.get_llm_client") as mock_get:
+            call_with_retry(
+                stage="build",
+                response_model=BuildResult,
+                system="system",
+                messages=[{"role": "user", "content": "test"}],
+                client=mock_client,
+            )
 
-        assert retrying.stop.max_attempt_number == 3
-        assert retrying.wait.min == 1.0
-        assert retrying.wait.max == 30.0
+        # get_llm_client should NOT have been called since we passed a client
+        mock_get.assert_not_called()
+        mock_client.create.assert_called_once()
 
 
 # ============================================================================

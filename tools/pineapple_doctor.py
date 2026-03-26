@@ -308,7 +308,7 @@ def check_config() -> CheckResult:
 def check_pipeline_tools() -> CheckResult:
     """Verify core tools exist on disk."""
     tools_dir = Path(__file__).resolve().parent
-    expected = ["apply_pipeline.py", "pipeline_state.py", "pineapple_config.py"]
+    expected = ["pineapple_doctor.py", "pineapple_verify.py"]
     missing = [name for name in expected if not (tools_dir / name).is_file()]
     if not missing:
         return CheckResult(

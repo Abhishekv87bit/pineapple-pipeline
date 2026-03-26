@@ -411,6 +411,55 @@ def get_llm_client(
     return LLMClient(client=client, model=model_name, provider=provider, stage=stage)
 
 
+def call_with_retry(
+    stage: str,
+    response_model: type[Any],
+    system: str,
+    messages: list[dict[str, str]],
+    max_tokens: int = 4096,
+    max_retries: int = 3,
+    client: "LLMClient | None" = None,
+) -> tuple[Any, str, float]:
+    """Call the LLM with cost tracking.
+
+    Retry is handled by the underlying SDKs:
+    - Anthropic SDK: retries HTTP 429/500/503 automatically (``max_retries``
+      on the client constructor).
+    - Google GenAI SDK: retries server errors with exponential backoff.
+    - Instructor: retries validation errors when ``max_retries`` is passed
+      to ``.create()``.
+
+    This function adds cost tracking on top of the native retry behaviour.
+
+    Args:
+        stage: Pipeline stage name (for provider routing and LangFuse).
+        response_model: Pydantic model class for Instructor to parse into.
+        system: System prompt.
+        messages: List of message dicts.
+        max_tokens: Max output tokens.
+        max_retries: Instructor validation retries (default 3).
+        client: Optional pre-created LLMClient to reuse (e.g. builder reuses
+                one client across all tasks). If None, a new client is created.
+
+    Returns:
+        Tuple of (parsed_result, provider_name, cost_usd).
+    """
+    llm = client if client is not None else get_llm_client(stage=stage)
+
+    result = llm.create(
+        response_model=response_model,
+        system=system,
+        messages=messages,
+        max_tokens=max_tokens,
+        max_retries=max_retries,
+    )
+
+    usage = _extract_usage(result, llm.provider)
+    cost = estimate_cost(llm.provider, usage)
+    flush_traces()
+    return result, llm.provider, cost
+
+
 def has_any_llm_key() -> bool:
     """Check if at least one LLM API key is configured."""
     return _has_gemini() or _has_claude()
