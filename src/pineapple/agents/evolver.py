@@ -1,9 +1,7 @@
-"""Stage 9: Evolver — session wrap-up and knowledge capture.
-
-Pure Python — no LLM calls. LLM calls for Mem0/DSPy come in Phase 4.
-"""
+"""Stage 9: Evolver — session wrap-up and knowledge capture."""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from pineapple.models import EvolveReport
@@ -11,13 +9,7 @@ from pineapple.state import PipelineState
 
 
 def evolve_node(state: PipelineState) -> dict:
-    """Print session summary and return EvolveReport with stubs for future integrations.
-
-    Future Phase 4 additions:
-    - Mem0: Extract and store memories from the session
-    - Neo4j: Update knowledge graph with project relationships
-    - DSPy: Optimize prompts based on session outcomes
-    """
+    """Print session summary and persist learnings to Mem0 and Neo4j."""
     project_name = state.get("project_name", "unknown")
     run_id = state.get("run_id", "unknown")
     print(f"[Stage 9: Evolve] Project: {project_name}, Run: {run_id}")
@@ -61,12 +53,88 @@ def evolve_node(state: PipelineState) -> dict:
         session_handoff_path=handoff_path,
         bible_updated=False,
         decisions_logged=decisions,
-        memory_extractions=[],  # Phase 4: Mem0 will populate this
+        memory_extractions=[],
     )
 
     print(f"  [Evolve] Session handoff: {report.session_handoff_path}")
     print(f"  [Evolve] Decisions logged: {len(report.decisions_logged)}")
-    print("  [Evolve] Mem0/Neo4j/DSPy: stubbed (Phase 4)")
+
+    # --- Mem0: Store session memories ---
+    memory_extractions = []
+    mem0_key = os.environ.get("MEM0_API_KEY")
+    if mem0_key:
+        try:
+            from mem0 import MemoryClient
+            mem0 = MemoryClient(api_key=mem0_key)
+
+            # Build memory text from session results
+            memory_text = (
+                f"Pipeline run for '{project_name}' ({path} path). "
+                f"Cost: ${cost:.4f}. "
+                f"{'Completed successfully' if not errors else f'{len(errors)} errors encountered'}. "
+                f"{'; '.join(decisions)}"
+            )
+
+            mem0.add(
+                messages=[{"role": "user", "content": memory_text}],
+                user_id="pineapple-pipeline",
+                metadata={"project": project_name, "run_id": run_id},
+            )
+            memory_extractions.append(memory_text)
+            print("  [Evolve] Mem0: Stored session memory")
+        except Exception as exc:
+            print(f"  [Evolve] Mem0: Failed — {exc}")
+    else:
+        print("  [Evolve] Mem0: Skipped (MEM0_API_KEY not set)")
+
+    # --- Neo4j: Update component graph ---
+    neo4j_uri = os.environ.get("NEO4J_URI")
+    neo4j_user = os.environ.get("NEO4J_USERNAME", "neo4j")
+    neo4j_password = os.environ.get("NEO4J_PASSWORD")
+    if neo4j_uri and neo4j_password:
+        try:
+            from neo4j import GraphDatabase
+            driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+
+            design_spec = state.get("design_spec") or {}
+            components = design_spec.get("components", [])
+
+            if components:
+                with driver.session() as neo4j_session:
+                    # Create project node
+                    neo4j_session.run(
+                        "MERGE (p:Project {name: $name}) SET p.last_run = $run_id, p.cost = $cost",
+                        name=project_name, run_id=run_id, cost=cost,
+                    )
+                    # Create component nodes and relationships
+                    for comp in components:
+                        comp_name = comp.get("name", "unknown")
+                        comp_desc = comp.get("description", "")
+                        neo4j_session.run(
+                            "MERGE (c:Component {name: $name}) SET c.description = $desc "
+                            "WITH c "
+                            "MATCH (p:Project {name: $project}) "
+                            "MERGE (p)-[:HAS_COMPONENT]->(c)",
+                            name=comp_name, desc=comp_desc, project=project_name,
+                        )
+                print(f"  [Evolve] Neo4j: Stored {len(components)} component(s) for '{project_name}'")
+            else:
+                print("  [Evolve] Neo4j: No components in design spec to store")
+
+            driver.close()
+        except Exception as exc:
+            print(f"  [Evolve] Neo4j: Failed — {exc}")
+    else:
+        print("  [Evolve] Neo4j: Skipped (NEO4J_URI not set)")
+
+    # Update report with real memory extractions
+    report = EvolveReport(
+        session_handoff_path=handoff_path,
+        bible_updated=False,
+        decisions_logged=decisions,
+        memory_extractions=memory_extractions,
+    )
+
     print(f"  [Evolve] Pipeline complete.")
 
     return {

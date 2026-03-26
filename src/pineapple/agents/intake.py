@@ -395,6 +395,93 @@ def _load_context_files(target_dir: Optional[Path] = None) -> list[str]:
     return found
 
 
+def _search_similar_projects(request: str, project_name: str) -> list[dict]:
+    """Search ChromaDB for similar past projects.
+
+    Returns a list of dicts with keys: project, request, summary, score.
+    Returns empty list if ChromaDB is not available or no matches found.
+    """
+    try:
+        import chromadb
+    except ImportError:
+        return []
+
+    db_path = os.path.join(".pineapple", "chromadb")
+    try:
+        client = chromadb.PersistentClient(path=db_path)
+        collection = client.get_or_create_collection(
+            name="project_history",
+            metadata={"description": "Past pipeline project specs and outcomes"},
+        )
+
+        # If collection is empty, nothing to search
+        if collection.count() == 0:
+            print("  [Intake] ChromaDB: No past projects stored yet")
+            return []
+
+        # Search for similar projects
+        results = collection.query(
+            query_texts=[request],
+            n_results=min(3, collection.count()),
+        )
+
+        similar = []
+        if results and results["documents"]:
+            for i, doc in enumerate(results["documents"][0]):
+                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                distance = results["distances"][0][i] if results["distances"] else 0
+                similar.append({
+                    "project": meta.get("project", "unknown"),
+                    "request": meta.get("request", ""),
+                    "summary": doc[:200],
+                    "score": round(1 - distance, 3) if distance else 0,
+                })
+            print(f"  [Intake] ChromaDB: Found {len(similar)} similar past project(s)")
+
+        return similar
+    except Exception as exc:
+        print(f"  [Intake] ChromaDB: Search failed — {exc}")
+        return []
+
+
+def store_project_in_chromadb(project_name: str, request: str, summary: str, design_spec: dict = None) -> bool:
+    """Store a completed project in ChromaDB for future similarity search.
+
+    Called by the evolver after a successful pipeline run.
+    Returns True if stored successfully.
+    """
+    try:
+        import chromadb
+    except ImportError:
+        return False
+
+    db_path = os.path.join(".pineapple", "chromadb")
+    try:
+        client = chromadb.PersistentClient(path=db_path)
+        collection = client.get_or_create_collection(name="project_history")
+
+        # Build document from available info
+        doc_parts = [f"Project: {project_name}", f"Request: {request}"]
+        if summary:
+            doc_parts.append(f"Summary: {summary}")
+        if design_spec:
+            components = design_spec.get("components", [])
+            if components:
+                comp_names = [c.get("name", "") for c in components]
+                doc_parts.append(f"Components: {', '.join(comp_names)}")
+
+        document = "\n".join(doc_parts)
+
+        collection.upsert(
+            ids=[project_name],
+            documents=[document],
+            metadatas=[{"project": project_name, "request": request}],
+        )
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Public node
 # ---------------------------------------------------------------------------
@@ -452,6 +539,11 @@ def intake_node(state: PipelineState) -> dict:
     if file_total:
         print(f"  [Intake] Files scanned: {file_total}")
 
+    # 6b. Search for similar past projects in ChromaDB.
+    similar_projects = _search_similar_projects(request, project_name)
+    if similar_projects:
+        print(f"  [Intake] Similar projects: {', '.join(s['project'] for s in similar_projects)}")
+
     # 7. Build the ContextBundle artifact.
     bundle = ContextBundle(
         project_type=project_type,
@@ -460,6 +552,7 @@ def intake_node(state: PipelineState) -> dict:
         codebase_summary=codebase_summary,
         project_memory=project_memory,
         loaded_at=datetime.now(timezone.utc),
+        similar_projects=similar_projects,
     )
 
     mem_sources = len(project_memory.get("memory_sources", []))

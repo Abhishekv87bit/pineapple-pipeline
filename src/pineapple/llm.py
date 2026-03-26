@@ -298,34 +298,31 @@ class LLMClient:
 
         # ------------------------------------------------------------------
         # LangFuse: open a generation span (if available)
+        # LangFuse v4 API: use start_observation(as_type='generation')
+        # instead of the v2 lf.trace() / trace.generation() pattern.
         # ------------------------------------------------------------------
         effective_stage = stage or self._stage
         lf = get_langfuse()
-        trace = None
         generation = None
         if lf is not None:
             try:
                 trace_name = f"pineapple:{effective_stage}" if effective_stage else "pineapple:call"
-                trace = lf.trace(
+                # Build a compact input representation for the generation span
+                gen_input = {"system": system, "messages": messages} if system else {"messages": messages}
+                generation = lf.start_observation(
                     name=trace_name,
+                    as_type="generation",
+                    model=self.model,
+                    input=gen_input,
+                    model_parameters={"max_tokens": max_tokens},
                     metadata={
                         "provider": self.provider,
-                        "model": self.model,
                         "stage": effective_stage or "unknown",
                         "response_model": response_model.__name__,
                     },
                 )
-                # Build a compact input representation for the generation span
-                gen_input = {"system": system, "messages": messages} if system else {"messages": messages}
-                generation = trace.generation(
-                    name=f"llm:{self.model}",
-                    model=self.model,
-                    input=gen_input,
-                    model_parameters={"max_tokens": max_tokens},
-                )
             except Exception as exc:
                 _logger.debug("LangFuse trace start failed: %s", exc)
-                trace = None
                 generation = None
 
         # ------------------------------------------------------------------
@@ -347,21 +344,26 @@ class LLMClient:
             # Record the generation result in LangFuse
             if generation is not None:
                 try:
-                    end_kwargs: dict[str, Any] = {
+                    # LangFuse v4: call generation.update() to set output/usage,
+                    # then generation.end() to close the span.
+                    # (generation.end() accepts no data kwargs in v4.)
+                    update_kwargs: dict[str, Any] = {
                         "metadata": {"elapsed_seconds": round(elapsed, 3)},
                     }
                     if error_obj is not None:
-                        end_kwargs["status_message"] = str(error_obj)
-                        end_kwargs["level"] = "ERROR"
+                        update_kwargs["status_message"] = str(error_obj)
+                        update_kwargs["level"] = "ERROR"
                     else:
-                        end_kwargs["output"] = (
+                        update_kwargs["output"] = (
                             result.model_dump() if hasattr(result, "model_dump") else str(result)
                         )
                         # Try to extract real token usage from the underlying response
                         usage = _extract_usage(result, self.provider)
                         if usage:
-                            end_kwargs["usage"] = usage
-                    generation.end(**end_kwargs)
+                            # v4 uses usage_details (dict[str, int])
+                            update_kwargs["usage_details"] = usage
+                    generation.update(**update_kwargs)
+                    generation.end()
                 except Exception as exc:
                     _logger.debug("LangFuse generation end failed: %s", exc)
 

@@ -21,6 +21,7 @@ class ContextBundle(BaseModel):
     codebase_summary: dict = Field(default_factory=dict)
     project_memory: dict = Field(default_factory=dict)
     loaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    similar_projects: list[dict] = Field(default_factory=list)
 
 
 # --- Strategic Review ---

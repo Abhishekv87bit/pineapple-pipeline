@@ -8,6 +8,7 @@ dependencies = [
     "pyyaml>=6.0,<7.0",
     "langgraph>=1.0,<2.0",
     "langchain-core>=0.1",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

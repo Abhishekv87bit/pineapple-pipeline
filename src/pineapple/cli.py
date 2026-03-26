@@ -348,6 +348,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """Parse arguments and dispatch to the appropriate command handler."""
+    # Load .env file (keys for LangFuse, Mem0, Neo4j, etc.)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     parser = _build_parser()
     args = parser.parse_args()
     args.func(args)
