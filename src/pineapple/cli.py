@@ -37,6 +37,20 @@ STAGE_LABELS: dict[str, str] = {
     PipelineStage.EVOLVE.value: "Evolve",
 }
 
+# Mapping of --resume-from stage numbers to LangGraph node names
+STAGE_NODES: dict[int, str] = {
+    0: "intake",
+    1: "strategic_review",
+    2: "architecture",
+    3: "plan",
+    4: "setup",
+    5: "build",
+    6: "verify",
+    7: "review",
+    8: "ship",
+    9: "evolve",
+}
+
 # Stages that produce key artifacts worth mentioning at gate prompts
 ARTIFACT_KEYS: dict[str, str] = {
     "strategic_review": "context_bundle",
@@ -164,6 +178,22 @@ def _cmd_run(args: argparse.Namespace) -> None:
             except OSError:
                 pass
 
+    # Validate --resume-from / --manifest combination
+    resume_from = getattr(args, 'resume_from', None)
+    manifest_path = getattr(args, 'manifest', None)
+
+    if resume_from is not None and manifest_path is None:
+        print("[ERROR] --resume-from requires --manifest to be provided.")
+        sys.exit(1)
+
+    if resume_from is not None and resume_from not in STAGE_NODES:
+        print(f"[ERROR] --resume-from must be between 0 and 9 (got {resume_from}).")
+        sys.exit(1)
+
+    start_node = "intake"
+    if resume_from is not None:
+        start_node = STAGE_NODES[resume_from]
+
     print(f"[INFO] Pipeline run started: {run_id}")
     print(f"[INFO] Path: {path}")
     print(f"[INFO] Request: {args.request}")
@@ -171,37 +201,55 @@ def _cmd_run(args: argparse.Namespace) -> None:
         print(f"[INFO] Project: {args.project_name}")
     if args.target_dir:
         print(f"[INFO] Target dir: {args.target_dir}")
+    if manifest_path and resume_from is not None:
+        print(f"[INFO] Manifest: {manifest_path}")
+        print(f"[INFO] Resuming from stage {resume_from}: {start_node}")
     print()
 
     # Build the initial state dict
-    initial_state: PipelineState = {
-        "run_id": run_id,
-        "request": args.request,
-        "project_name": args.project_name or "",
-        "target_dir": args.target_dir or "",
-        "branch": "",
-        "path": path,
-        "current_stage": PipelineStage.INTAKE.value,
-        # Artifacts -- all empty at start
-        "context_bundle": None,
-        "strategic_brief": None,
-        "design_spec": None,
-        "task_plan": None,
-        "workspace_info": None,
-        "build_results": [],
-        "verify_record": None,
-        "review_result": None,
-        "ship_result": None,
-        "evolve_report": None,
-        # Control flow
-        "attempt_counts": {},
-        "human_approvals": {},
-        "cost_total_usd": 0.0,
-        "errors": [],
-        "messages": [],
-    }
+    if manifest_path is not None and resume_from is not None:
+        try:
+            from pineapple.manifest_loader import build_state_from_manifest  # type: ignore[import-untyped]
+        except ImportError:
+            print("[ERROR] pineapple.manifest_loader module not found.")
+            sys.exit(1)
+        initial_state: PipelineState = build_state_from_manifest(
+            manifest_path,
+            run_id=run_id,
+            request=args.request,
+            project_name=args.project_name or "",
+            target_dir=args.target_dir or "",
+            path=path,
+        )
+    else:
+        initial_state: PipelineState = {
+            "run_id": run_id,
+            "request": args.request,
+            "project_name": args.project_name or "",
+            "target_dir": args.target_dir or "",
+            "branch": "",
+            "path": path,
+            "current_stage": PipelineStage.INTAKE.value,
+            # Artifacts -- all empty at start
+            "context_bundle": None,
+            "strategic_brief": None,
+            "design_spec": None,
+            "task_plan": None,
+            "workspace_info": None,
+            "build_results": [],
+            "verify_record": None,
+            "review_result": None,
+            "ship_result": None,
+            "evolve_report": None,
+            # Control flow
+            "attempt_counts": {},
+            "human_approvals": {},
+            "cost_total_usd": 0.0,
+            "errors": [],
+            "messages": [],
+        }
 
-    pipeline = create_pipeline(db_path=DEFAULT_DB_PATH)
+    pipeline = create_pipeline(db_path=DEFAULT_DB_PATH, start_node=start_node)
     config = {"configurable": {"thread_id": run_id}}
 
     try:
@@ -343,6 +391,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Force a fresh run (ignore any existing checkpoints with the same ID)",
+    )
+    run_parser.add_argument(
+        "--manifest",
+        default=None,
+        help="Path to MANIFEST.yaml for resuming with pre-computed artifacts",
+    )
+    run_parser.add_argument(
+        "--resume-from",
+        type=int,
+        default=None,
+        help="Resume pipeline from this stage number (0-9). Requires --manifest.",
     )
     run_parser.set_defaults(func=_cmd_run)
 

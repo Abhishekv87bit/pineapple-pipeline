@@ -82,7 +82,7 @@ def _make_sqlite_checkpointer(db_path: str):
 _SENTINEL = object()
 
 
-def create_pipeline(checkpointer=_SENTINEL, db_path=".pineapple/checkpoints.db"):
+def create_pipeline(checkpointer=_SENTINEL, db_path=".pineapple/checkpoints.db", start_node: str = "intake"):
     """Build and compile the Pineapple Pipeline graph.
 
     Args:
@@ -92,6 +92,8 @@ def create_pipeline(checkpointer=_SENTINEL, db_path=".pineapple/checkpoints.db")
                  Defaults to '.pineapple/checkpoints.db'. Only used when
                  checkpointer is not explicitly provided. Set to None to
                  fall back to MemorySaver.
+        start_node: Graph entry point node name. Defaults to "intake".
+                    Override to resume from a specific stage (e.g. "build").
 
     Returns:
         A compiled StateGraph ready to invoke.
@@ -129,7 +131,7 @@ def create_pipeline(checkpointer=_SENTINEL, db_path=".pineapple/checkpoints.db")
     graph.add_node("human_intervention", human_intervention_node)
 
     # -- Entry point ---------------------------------------------------------
-    graph.set_entry_point("intake")
+    graph.set_entry_point(start_node)
 
     # -- Edges ---------------------------------------------------------------
 
