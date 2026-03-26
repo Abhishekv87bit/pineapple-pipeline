@@ -64,13 +64,27 @@ Test tasks should:
 - Have files_to_create pointing to tests/ directory
 - Have complexity "trivial" or "standard"
 - Come immediately after the implementation task they test
-Example: if task 1 creates src/manifest.py, task 2 should create tests/test_manifest.py"""
+Example: if task 1 creates src/manifest.py, task 2 should create tests/test_manifest.py
+
+CRITICAL — USE THE EXACT NAMES FROM THE ARCHITECTURE:
+- Use the EXACT component names from the architecture document (e.g. "Module Manager",
+  "Module Executor", "VLAD Runner" — NOT generic names like "ModuleA", "ModuleB").
+- Map every task to the specific file paths listed in the architecture document.
+- Follow the build phases and dependency order defined in the architecture.
+- Do NOT invent placeholder names. If the architecture names a component, use that name."""
 
 _USER_PROMPT_TEMPLATE = """\
-Design Specification:
+CRITICAL: Your tasks MUST use the exact component names, file paths, and build \
+phases from the architecture document below. Do NOT invent generic names like \
+"ModuleA" or "ModuleB" — use the real names defined in the architecture.
+
+## Full Architecture Document
+{architecture_document}
+
+## Design Specification (parsed summary)
 {design_spec_json}
 
-Strategic Brief (for context):
+## Strategic Brief (for context)
 {strategic_brief_json}
 
 Project: {project_name}
@@ -88,14 +102,37 @@ Order by dependency — foundational tasks first."""
 
 
 def _build_user_prompt(state: PipelineState) -> str:
-    """Construct the user prompt from pipeline state."""
+    """Construct the user prompt from pipeline state.
+
+    When the design_spec dict contains a ``_raw_document`` key (injected by
+    manifest_loader from the architecture markdown file), the full document is
+    sent as ``architecture_document`` so the LLM sees every detail: file
+    inventory, API endpoints, build phases, risk assessment, etc.
+
+    Falls back to a note when only the parsed dict is available (e.g. when
+    running a fresh pipeline where architecture was just generated in-memory).
+    """
     design_spec = state.get("design_spec") or {}
     strategic_brief = state.get("strategic_brief") or {}
     project_name = state.get("project_name", "unknown")
     request = state.get("request", "")
 
+    # Extract raw markdown if it was stored by manifest_loader; exclude it from
+    # the JSON dump so we don't duplicate it.
+    raw_document: str = design_spec.get("_raw_document", "")
+    if raw_document:
+        # Build a copy without the internal key for the JSON summary section
+        spec_for_json = {k: v for k, v in design_spec.items() if k != "_raw_document"}
+        architecture_document = raw_document
+    else:
+        spec_for_json = design_spec
+        architecture_document = (
+            "(Full architecture markdown not available — using parsed summary below)"
+        )
+
     return _USER_PROMPT_TEMPLATE.format(
-        design_spec_json=json.dumps(design_spec, indent=2),
+        architecture_document=architecture_document,
+        design_spec_json=json.dumps(spec_for_json, indent=2),
         strategic_brief_json=json.dumps(strategic_brief, indent=2),
         project_name=project_name,
         request=request,

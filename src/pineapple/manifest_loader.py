@@ -381,13 +381,15 @@ def _parse_design_spec(markdown: str) -> dict[str, Any]:
         if re.search(pattern, markdown, re.IGNORECASE):
             tech_choices.append({"category": category, "choice": choice})
 
-    return {
+    spec: dict[str, Any] = {
         "title": title,
         "summary": summary,
         "components": components,
         "technology_choices_list": tech_choices,
         "approved": False,
     }
+    # _raw_document is injected by callers that pass raw_md — see build_state_from_manifest
+    return spec
 
 
 # ---------------------------------------------------------------------------
@@ -537,9 +539,12 @@ def _find_arch_path(manifest: dict[str, Any], base_dir: str) -> str | None:
 
 def build_state_from_manifest(
     manifest_path: str,
-    resume_from: int,
+    resume_from: int = 0,
     request: str = "",
     target_dir: str | None = None,
+    run_id: str = "",
+    project_name: str = "",
+    path: str = "",
 ) -> PipelineState:
     """Build a PipelineState dict populated from MANIFEST + artifacts.
 
@@ -570,7 +575,9 @@ def build_state_from_manifest(
     # --- 1. Load MANIFEST ---------------------------------------------------
     manifest = load_manifest(str(manifest_abs))
 
-    project_name: str = manifest.get("project", "unknown-project")
+    manifest_project: str = manifest.get("project", "unknown-project")
+    if not project_name:
+        project_name = manifest_project
     if not request:
         request = f"Resume {project_name} from stage {resume_from}"
 
@@ -614,6 +621,11 @@ def build_state_from_manifest(
             try:
                 arch_md = load_artifact(arch_rel, base_dir)
                 design_spec = _parse_design_spec(arch_md)
+                # Store the full raw markdown so the planner prompt receives
+                # the complete architecture document (file inventory, API
+                # endpoints, build phases, risk assessment, etc.) rather than
+                # the lossy parsed dict alone.
+                design_spec["_raw_document"] = arch_md
             except FileNotFoundError:
                 design_spec = {
                     "title": f"{project_name} Architecture",
@@ -631,6 +643,7 @@ def build_state_from_manifest(
             try:
                 arch_md = load_artifact(arch_rel, base_dir)
                 design_spec = _parse_design_spec(arch_md)
+                design_spec["_raw_document"] = arch_md
             except FileNotFoundError:
                 pass
 
@@ -643,20 +656,22 @@ def build_state_from_manifest(
     stages = manifest.get("stages", [])
     completed_count = sum(1 for s in stages if s.get("status") == "completed")
     if completed_count <= 1:
-        path = "lightweight"
+        inferred_path = "lightweight"
     elif completed_count <= 3:
-        path = "medium"
+        inferred_path = "medium"
     else:
-        path = "full"
+        inferred_path = "full"
 
     # --- 8. Assemble PipelineState ------------------------------------------
+    effective_run_id = run_id if run_id else str(uuid.uuid4())
+    effective_path = path if path else inferred_path
     state: PipelineState = {
         # Identity
-        "run_id": str(uuid.uuid4()),
+        "run_id": effective_run_id,
         "request": request,
         "project_name": project_name,
         "branch": branch,
-        "path": path,
+        "path": effective_path,
         "current_stage": current_stage,
         "target_dir": target_dir or "",
         # Stage artifacts
