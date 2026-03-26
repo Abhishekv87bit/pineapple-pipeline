@@ -359,6 +359,42 @@ def builder_node(state: PipelineState) -> dict:
         if run_files:
             print(f"  [Build] Retry attempt {attempt_counts['build'] + 1}: {len(run_files)} files from previous pass marked for overwrite")
 
+    # On retry: build feedback context from reviewer and verifier
+    retry_feedback = ""
+    if attempt_counts.get("build", 0) > 0:
+        review_result = state.get("review_result") or {}
+        verify_record = state.get("verify_record") or {}
+
+        feedback_parts = []
+
+        # Reviewer's critical and important issues
+        critical = review_result.get("critical_issues", [])
+        important = review_result.get("important_issues", [])
+        if critical:
+            feedback_parts.append("CRITICAL ISSUES FROM REVIEWER (must fix):\n" + "\n".join(f"  - {i}" for i in critical))
+        if important:
+            feedback_parts.append("IMPORTANT ISSUES FROM REVIEWER:\n" + "\n".join(f"  - {i}" for i in important))
+
+        # Verifier's layer failures
+        layers = verify_record.get("layers", [])
+        failed_layers = [l for l in layers if l.get("status") == "fail"]
+        if failed_layers:
+            layer_details = []
+            for l in failed_layers:
+                name = l.get("name", "unknown")
+                details = l.get("details", "")[:200]
+                layer_details.append(f"  - {name}: {details}")
+            feedback_parts.append("VERIFICATION FAILURES:\n" + "\n".join(layer_details))
+
+        if feedback_parts:
+            retry_feedback = (
+                "\n\n=== RETRY FEEDBACK (from previous attempt) ===\n"
+                "The previous build attempt had these issues. You MUST fix them in this attempt:\n\n"
+                + "\n\n".join(feedback_parts)
+                + "\n=== END RETRY FEEDBACK ===\n\n"
+            )
+            print(f"  [Build] Injecting reviewer/verifier feedback into builder context ({len(critical)} critical, {len(important)} important issues)")
+
     for task in task_plan.tasks:
         print(f"  [Build] Task {task.id}: {task.description}")
 
@@ -373,6 +409,10 @@ def builder_node(state: PipelineState) -> dict:
             for fw in cumulative_files:
                 content_preview = fw.content[:2000] if fw.content else "(empty)"
                 prior_context += f"\n--- {fw.path} ---\n{content_preview}\n"
+
+        # Prepend retry feedback to prior context so builder knows what to fix
+        if retry_feedback:
+            prior_context = retry_feedback + prior_context
 
         if use_llm:
             try:
