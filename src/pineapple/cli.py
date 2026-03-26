@@ -9,6 +9,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import os
 import sqlite3
 import sys
@@ -102,8 +103,38 @@ def _approval_loop(pipeline, config: dict, run_id: str) -> None:
         elif choice == "q":
             print(f"  [INFO] Run paused. Resume with:  pineapple resume {run_id}")
             return
+        elif choice == "n":
+            # Collect feedback and store it in state for the stage to re-run
+            print("  [GATE] Enter feedback (what should change). Press Enter twice to submit:")
+            lines = []
+            while True:
+                try:
+                    line = input()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if line == "":
+                    break
+                lines.append(line)
+
+            feedback_text = "\n".join(lines).strip()
+            if not feedback_text:
+                print("  [INFO] No feedback provided. Approve (y), reject (n), or quit (q).")
+                continue
+
+            # Store feedback in state and re-invoke the previous stage
+            current_errors = state.values.get("errors", [])
+            current_errors.append({
+                "stage": next_node,
+                "message": f"Human feedback: {feedback_text}",
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "recoverable": True,
+            })
+            pipeline.update_state(config, {"errors": current_errors})
+
+            print(f"  [GATE] Feedback recorded. Re-running {label}...")
+            result = pipeline.invoke(None, config)
         else:
-            print("  [INFO] Feedback not yet implemented. Approve (y) or quit (q).")
+            print("  [INFO] Invalid choice. Approve (y), reject (n), or quit (q).")
 
 
 # ---------------------------------------------------------------------------

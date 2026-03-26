@@ -394,6 +394,48 @@ def _run_domain_validation(workspace: Optional[str] = None) -> LayerResult:
 
 
 # ---------------------------------------------------------------------------
+# Persistence helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_branch(workspace: str | None) -> str:
+    """Get current git branch name, or 'unknown' if not in a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=workspace,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().replace("/", "-")  # sanitize for filename
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
+
+
+def _persist_record(record: VerificationRecord, workspace: str | None) -> None:
+    """Write verification record to .pineapple/verify/<branch>.json and last_verify.json."""
+    base = Path(workspace) if workspace else Path.cwd()
+    verify_dir = base / ".pineapple" / "verify"
+    try:
+        verify_dir.mkdir(parents=True, exist_ok=True)
+        record_data = json.dumps(record.model_dump(), indent=2, default=str)
+
+        # Per-branch record
+        branch = _get_branch(workspace)
+        (verify_dir / f"{branch}.json").write_text(record_data, encoding="utf-8")
+
+        # Convenience pointer
+        (verify_dir / "last_verify.json").write_text(record_data, encoding="utf-8")
+
+        print(f"  [Verify] Records written: .pineapple/verify/{branch}.json, last_verify.json")
+    except OSError as exc:
+        print(f"  [Verify] Could not write verification record: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Public node
 # ---------------------------------------------------------------------------
 
@@ -467,6 +509,9 @@ def verifier_node(state: PipelineState) -> dict:
 
     verdict = "ALL GREEN" if all_green else "ISSUES FOUND"
     print(f"  [Verify] Overall: {verdict} ({passed} passed, {failed} failed, {skipped} skipped)")
+
+    # Write verification record to disk (per-branch + last)
+    _persist_record(record, workspace)
 
     return {
         "current_stage": "verify",
