@@ -494,6 +494,26 @@ def _process_build_result(
 
 
 # ---------------------------------------------------------------------------
+# Keyword extraction helper for reviewer-task matching
+# ---------------------------------------------------------------------------
+
+
+def _extract_keywords(text: str) -> list[str]:
+    """Extract significant keywords from task description for matching."""
+    stop_words = {
+        "the", "a", "an", "and", "or", "for", "to", "of", "in", "is", "it",
+        "its", "this", "that", "with", "from", "by", "as", "on", "at", "be",
+        "will", "can", "has", "have", "was", "are", "not", "but", "all",
+        "their", "each", "which", "do", "how", "if", "up", "out", "no", "so",
+        "what", "when", "who", "get", "set", "should", "would", "could",
+        "also", "into", "than", "then", "them", "these", "those", "some",
+        "any", "such", "only", "other", "new", "one", "our", "may", "like",
+    }
+    words = text.split()
+    return [w for w in words if len(w) > 3 and w not in stop_words]
+
+
+# ---------------------------------------------------------------------------
 # Per-task retry feedback helpers
 # ---------------------------------------------------------------------------
 
@@ -698,6 +718,36 @@ def builder_node(state: PipelineState) -> dict:
 
     attempt_count = attempt_counts.get("build", 0)
     if attempt_count > 0 and previous_results:
+        # Check if reviewer flagged specific tasks via critical_issues.
+        # Re-mark those completed tasks as "failed" so they get re-run.
+        review_result_for_retry = state.get("review_result") or {}
+        critical_issues = review_result_for_retry.get("critical_issues", [])
+
+        if critical_issues:
+            tasks_to_rerun: set[str] = set()
+            for issue in critical_issues:
+                issue_lower = issue.lower()
+                for task in task_plan.tasks:
+                    task_desc_lower = task.description.lower()
+                    keywords = _extract_keywords(task_desc_lower)
+                    if any(keyword in issue_lower for keyword in keywords):
+                        tasks_to_rerun.add(task.id)
+
+            if tasks_to_rerun:
+                for r in previous_results:
+                    if r["task_id"] in tasks_to_rerun and r.get("status") == "completed":
+                        r["status"] = "failed"
+                print(f"  [Build] Reviewer flagged {len(tasks_to_rerun)} tasks for re-run: {tasks_to_rerun}")
+
+            # On attempt >= 3 with the same tasks still failing, inject extra fix context
+            if attempt_count >= 3 and tasks_to_rerun:
+                # Store the set so _build_one_task can inject it via review_result
+                if "reviewer_rerun_tasks" not in review_result_for_retry:
+                    review_result_for_retry = dict(review_result_for_retry)
+                    review_result_for_retry["reviewer_rerun_tasks"] = list(tasks_to_rerun)
+                    review_result_for_retry["reviewer_rerun_attempt"] = attempt_count
+                    print(f"  [Build] Attempt {attempt_count + 1}: injecting escalated fix context for {tasks_to_rerun}")
+
         completed_ids = {r["task_id"] for r in previous_results if r.get("status") == "completed"}
         original_count = len(task_plan.tasks)
         task_plan.tasks = [t for t in task_plan.tasks if t.id not in completed_ids]
