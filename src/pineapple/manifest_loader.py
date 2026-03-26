@@ -626,6 +626,7 @@ def build_state_from_manifest(
                 # endpoints, build phases, risk assessment, etc.) rather than
                 # the lossy parsed dict alone.
                 design_spec["_raw_document"] = arch_md
+                print(f"  [Manifest] Injected _raw_document ({len(arch_md)} chars) into design_spec")
             except FileNotFoundError:
                 design_spec = {
                     "title": f"{project_name} Architecture",

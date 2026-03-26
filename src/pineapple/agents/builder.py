@@ -639,10 +639,7 @@ def builder_node(state: PipelineState) -> dict:
 
     # Check builder mode: single_shot (default) or agent (multi-turn with tools)
     builder_mode = os.environ.get("PINEAPPLE_BUILDER", "single_shot")
-    if builder_mode == "agent":
-        print(f"  [Build] Mode: AGENT (multi-turn with tools)")
-    else:
-        print(f"  [Build] Mode: single-shot")
+    print(f"  [Build] Mode: {builder_mode}")
 
     build_results = []  # type: list[dict]
     total_cost = 0.0
@@ -650,10 +647,11 @@ def builder_node(state: PipelineState) -> dict:
     # Check if architecture-aware orchestration is available
     raw_architecture = design_spec_data.get("_raw_document", "")
     _MAX_CONCURRENT = int(os.environ.get("PINEAPPLE_MAX_CONCURRENT", "4"))
-    if raw_architecture and builder_mode == "agent":
+    if raw_architecture:
+        print(f"  [Build] Architecture document found ({len(raw_architecture)} chars) — phased orchestration active")
         try:
             from pineapple.orchestrator import run_phased_build
-            print("  [Build] Architecture document found — delegating to phased orchestrator")
+            print("  [Build] Delegating to phased orchestrator")
             phased_results, phased_cost = run_phased_build(
                 tasks=[t for t in task_plan.tasks],  # Task objects
                 workspace=workspace,
@@ -692,6 +690,9 @@ def builder_node(state: PipelineState) -> dict:
             }
         except ImportError:
             print("  [Build] Orchestrator not available, falling back to flat execution")
+
+    if not raw_architecture:
+        print("  [Build] No architecture document in design_spec — using flat execution")
 
     # Determine if we can use LLM
     use_llm = _HAS_LLM_DEPS and has_any_llm_key()
