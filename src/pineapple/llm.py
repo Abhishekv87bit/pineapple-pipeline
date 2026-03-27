@@ -461,19 +461,37 @@ def call_with_retry(
     llm = client if client is not None else get_llm_client(stage=stage)
 
     from pineapple.spinner import Spinner
-    with Spinner(f"Calling {llm.provider}..."):
-        result = llm.create(
-            response_model=response_model,
-            system=system,
-            messages=messages,
-            max_tokens=max_tokens,
-            max_retries=max_retries,
-        )
 
-    usage = _extract_usage(result, llm.provider)
-    cost = estimate_cost(llm.provider, usage)
-    flush_traces()
-    return result, llm.provider, cost
+    # Retry with exponential backoff for rate-limit (429) errors.
+    # Instructor retries validation errors instantly; this outer loop
+    # handles API-level throttling that needs a cooldown.
+    _RATE_LIMIT_RETRIES = int(os.environ.get("PINEAPPLE_RATE_LIMIT_RETRIES", "5"))
+    last_error = None
+    for attempt in range(_RATE_LIMIT_RETRIES):
+        try:
+            with Spinner(f"Calling {llm.provider}..."):
+                result = llm.create(
+                    response_model=response_model,
+                    system=system,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    max_retries=max_retries,
+                )
+            usage = _extract_usage(result, llm.provider)
+            cost = estimate_cost(llm.provider, usage)
+            flush_traces()
+            return result, llm.provider, cost
+        except Exception as exc:
+            last_error = exc
+            err_str = str(exc).lower()
+            if "429" in err_str or "resource_exhausted" in err_str or "rate" in err_str:
+                wait = min(30 * (2 ** attempt), 120)  # 30s, 60s, 120s, 120s, 120s
+                print(f"  [LLM] Rate limited (attempt {attempt + 1}/{_RATE_LIMIT_RETRIES}), waiting {wait}s...")
+                time.sleep(wait)
+                continue
+            raise  # Non-rate-limit error, don't retry
+
+    raise last_error  # All retries exhausted
 
 
 def has_any_llm_key() -> bool:
