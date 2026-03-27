@@ -293,12 +293,13 @@ def run_claude_code_task(
         "--max-turns", str(effective_max_turns),
         "--model", model,
         "--no-session-persistence",
+        "--allowedTools", "Edit,Write,Bash,Read",
     ]
     if system_prompt_file:
         cmd.extend(["--append-system-prompt-file", system_prompt_file])
 
-    # The prompt is passed as the final positional argument
-    cmd.append(user_prompt)
+    # Prompt is piped via stdin (not as positional arg — avoids shell quoting
+    # issues and --allowedTools eating the prompt on Windows)
 
     # Run claude CLI
     raw_output = ""
@@ -307,6 +308,7 @@ def run_claude_code_task(
         proc = subprocess.run(
             cmd,
             cwd=workspace,
+            input=user_prompt,
             capture_output=True,
             text=True,
             timeout=600,
