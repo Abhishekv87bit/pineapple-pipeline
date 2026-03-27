@@ -64,7 +64,7 @@ ARTIFACT_KEYS: dict[str, str] = {
 # Human-in-the-loop gate prompt
 # ---------------------------------------------------------------------------
 
-def _approval_loop(pipeline, config: dict, run_id: str) -> None:
+def _approval_loop(pipeline, config: dict, run_id: str, auto_approve: bool = False) -> None:
     """Check for interrupt gates and prompt the user for approval.
 
     Loops until the graph finishes or the user quits.
@@ -99,6 +99,15 @@ def _approval_loop(pipeline, config: dict, run_id: str) -> None:
                 print(f"  [GATE] Already approved:       {', '.join(approved)}")
 
         print()
+
+        if auto_approve:
+            print("  [GATE] Auto-approved (--yes)")
+            pipeline.update_state(
+                config,
+                {"human_approvals": {**approvals, next_node: True}},
+            )
+            pipeline.invoke(None, config)
+            continue
 
         try:
             choice = input("  [GATE] Approve and continue? [y/n/q]: ").strip().lower()
@@ -258,7 +267,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         pipeline.invoke(initial_state, config)
 
         # Enter approval loop (handles all interrupt gates)
-        _approval_loop(pipeline, config, run_id)
+        _approval_loop(pipeline, config, run_id, auto_approve=getattr(args, 'yes', False))
 
     except KeyboardInterrupt:
         print()
@@ -340,7 +349,7 @@ def _cmd_resume(args: argparse.Namespace) -> None:
     print()
 
     try:
-        _approval_loop(pipeline, config, run_id)
+        _approval_loop(pipeline, config, run_id, auto_approve=getattr(args, 'yes', False))
     except KeyboardInterrupt:
         print()
         print(f"[WARN] Run interrupted.")
@@ -404,6 +413,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Resume pipeline from this stage number (0-9). Requires --manifest.",
     )
+    run_parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        default=False,
+        help="Auto-approve all interrupt gates (non-interactive mode)",
+    )
     run_parser.set_defaults(func=_cmd_run)
 
     # --- status ---
@@ -413,6 +428,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- resume ---
     resume_parser = subparsers.add_parser("resume", help="Resume an interrupted run")
     resume_parser.add_argument("run_id", help="The run ID to resume")
+    resume_parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        default=False,
+        help="Auto-approve all interrupt gates (non-interactive mode)",
+    )
     resume_parser.set_defaults(func=_cmd_resume)
 
     return parser
