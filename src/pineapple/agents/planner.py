@@ -144,7 +144,76 @@ def _build_user_prompt(state: PipelineState) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _call_llm(system: str, user: str) -> tuple[TaskPlan, str, float]:
+def _call_claude_code_planner(system: str, user: str) -> tuple[TaskPlan, str, float]:
+    """Fallback: use Claude Code CLI to generate a TaskPlan when Gemini fails."""
+    import subprocess
+    import os
+
+    prompt = f"""{system}
+
+---
+
+{user}
+
+---
+
+IMPORTANT: Respond with ONLY valid JSON matching this schema (no markdown, no explanation):
+{{
+  "tasks": [
+    {{
+      "id": "T1",
+      "description": "...",
+      "files_to_create": ["path/to/file.py"],
+      "files_to_modify": [],
+      "complexity": "trivial|standard|complex",
+      "estimated_cost_usd": 0.05
+    }}
+  ],
+  "total_estimated_cost_usd": 0.50,
+  "approved": false
+}}
+"""
+
+    model = os.environ.get("PINEAPPLE_CLAUDE_CODE_MODEL", "sonnet")
+    proc = subprocess.run(
+        [
+            "claude", "-p",
+            "--output-format", "json",
+            "--max-turns", "3",
+            "--model", model,
+            "--no-session-persistence",
+        ],
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    # Parse Claude Code's JSON output to get the result text
+    raw = proc.stdout or ""
+    try:
+        cc_output = json.loads(raw)
+        result_text = cc_output.get("result", "")
+        cost = cc_output.get("total_cost_usd", 0.0)
+    except (json.JSONDecodeError, TypeError):
+        result_text = raw
+        cost = 0.0
+
+    # Extract JSON from result text (may be wrapped in markdown code blocks)
+    import re
+    json_match = re.search(r'\{[\s\S]*"tasks"[\s\S]*\}', result_text)
+    if json_match:
+        plan_data = json.loads(json_match.group())
+    else:
+        raise ValueError(f"Claude Code did not return valid TaskPlan JSON: {result_text[:200]}")
+
+    plan = TaskPlan(**plan_data)
+    return plan, "claude_code", cost
+
+
+
     """Call the LLM via the router and return (TaskPlan, provider, cost_usd).
 
     Retries up to 3 times with exponential backoff for transient failures.
@@ -235,12 +304,19 @@ def plan_node(state: PipelineState) -> dict:
             ],
         }
 
-    # --- Main path: call LLM ---
+    # --- Main path: call LLM (with Claude Code CLI fallback) ---
     try:
         user_prompt = _build_user_prompt(state)
 
         print("  [Plan] Calling LLM to generate task plan...")
-        plan, provider, call_cost = _call_llm(_SYSTEM_PROMPT, user_prompt)
+        try:
+            plan, provider, call_cost = _call_llm(_SYSTEM_PROMPT, user_prompt)
+        except Exception as gemini_err:
+            print(f"  [Plan] Gemini failed: {str(gemini_err)[:100]}")
+            print("  [Plan] Falling back to Claude Code CLI for planning...")
+            plan, provider, call_cost = _call_claude_code_planner(
+                _SYSTEM_PROMPT, user_prompt,
+            )
 
         # Force approved=False — human must approve at the interrupt gate
         plan.approved = False
