@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,9 @@ _logger = logging.getLogger(__name__)
 
 # Max conversation turns before giving up
 MAX_TURNS = int(os.environ.get("PINEAPPLE_AGENT_MAX_TURNS", "25"))
+
+# Per-turn LLM timeout in seconds
+_AGENT_TURN_TIMEOUT = int(os.environ.get("PINEAPPLE_AGENT_TURN_TIMEOUT", "90"))
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +233,7 @@ def run_agent_task(
     architecture_context: str = "",
     allowed_paths: set[str] | None = None,
     workspace_manifest: str = "",
+    skip_tests: bool = False,
 ) -> tuple[list[dict], float, str]:
     """Run a Gemini agent conversation for a single build task.
 
@@ -250,6 +255,9 @@ def run_agent_task(
             Files written outside this set get a soft WARNING (not blocked).
         workspace_manifest: Pre-built listing of workspace files. When provided,
             replaces the default "list existing files" instruction.
+        skip_tests: When True, suppress test-running instructions. Use for
+            Phase 1-4 agents where dependencies from later phases don't exist
+            yet. Prevents test-failure spirals caused by missing imports.
 
     Returns:
         Tuple of (files_written_dicts, cost_usd, summary).
@@ -275,10 +283,21 @@ def run_agent_task(
         "1. Read existing files to understand the codebase\n"
         "2. Write implementation files\n"
         "3. Write test files\n"
-        "4. Run tests with run_command('pytest <test_file> -v')\n"
-        "5. If tests fail, read the errors, fix the code, re-run\n"
-        "6. When tests pass, call task_complete with a summary\n\n"
-        "RULES:\n"
+    )
+    if skip_tests:
+        system += (
+            "4. Do NOT run tests — dependencies from other build phases are not yet available.\n"
+            "   Other modules you import from may not exist on disk yet. That is expected.\n"
+            "5. Call task_complete with a summary when all files are written.\n"
+        )
+    else:
+        system += (
+            "4. Run tests with run_command('pytest <test_file> -v')\n"
+            "5. If tests fail, read the errors, fix the code, re-run\n"
+            "6. When tests pass, call task_complete with a summary\n"
+        )
+    system += (
+        "\nRULES:\n"
         "- Write REAL code, not stubs or placeholders\n"
         "- Always run tests after writing code\n"
         "- Fix errors iteratively — don't give up\n"
@@ -340,18 +359,27 @@ def run_agent_task(
     contents = [types.Content(role="user", parts=[types.Part(text=user_msg)])]
 
     for turn in range(turns):
-        # Call Gemini
+        # Call Gemini with per-turn timeout
         try:
-            response = client.models.generate_content(
-                model=os.environ.get("PINEAPPLE_MODEL_GEMINI", "gemini-2.5-flash"),
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    tools=[gemini_tools],
-                    temperature=0.2,
-                    max_output_tokens=8192,
-                ),
-            )
+            def _gemini_call() -> Any:
+                return client.models.generate_content(
+                    model=os.environ.get("PINEAPPLE_MODEL_GEMINI", "gemini-2.5-flash"),
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        tools=[gemini_tools],
+                        temperature=0.2,
+                        max_output_tokens=8192,
+                    ),
+                )
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_gemini_call)
+                try:
+                    response = future.result(timeout=_AGENT_TURN_TIMEOUT)
+                except FuturesTimeout:
+                    print(f"      [Agent] Turn {turn+1}: LLM call timed out after {_AGENT_TURN_TIMEOUT}s")
+                    break
         except Exception as exc:
             _logger.error("Gemini call failed on turn %d: %s", turn + 1, exc)
             break

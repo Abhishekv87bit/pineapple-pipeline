@@ -365,6 +365,7 @@ def _build_one_task(
     verify_record: dict, run_files: set[str], workspace_info: dict,
     use_llm: bool, llm, builder_mode: str,
     design_spec: dict | None = None,
+    skip_tests: bool = False,
 ) -> tuple[BuildResult, float]:
     """Build a single task using either single-shot or agent mode."""
     print(f"  [Build] Task {task.id}: {task.description}")
@@ -377,7 +378,7 @@ def _build_one_task(
     if cumulative_files:
         prior_context = "Previously completed files in this run (do NOT recreate, but you may import from them):\n"
         for fw in cumulative_files:
-            content_preview = fw.content[:2000] if fw.content else "(empty)"
+            content_preview = fw.content[:4000] if fw.content else "(empty)"
             prior_context += f"\n--- {fw.path} ---\n{content_preview}\n"
     if review_result or verify_record:
         task_feedback = _get_task_feedback(task, review_result, verify_record)
@@ -391,7 +392,7 @@ def _build_one_task(
 
     if builder_mode == "agent":
         architecture_context = _extract_architecture_context(task, design_spec)
-        return _build_task_agent(task, workspace, design_summary, prior_context, architecture_context=architecture_context)
+        return _build_task_agent(task, workspace, design_summary, prior_context, architecture_context=architecture_context, skip_tests=skip_tests)
     else:
         return _build_task_single_shot(task, design_summary, llm, prior_context)
 
@@ -413,6 +414,7 @@ def _build_task_single_shot(
 def _build_task_agent(
     task: Task, workspace: str, design_summary: str, prior_context: str,
     architecture_context: str = "",
+    skip_tests: bool = False,
 ) -> tuple[BuildResult, float]:
     """Multi-turn agent with tools."""
     try:
@@ -422,6 +424,10 @@ def _build_task_agent(
         return _build_task_single_shot(task, design_summary, None, prior_context)
 
     try:
+        # Scale max_turns by task complexity
+        _TURNS_BY_COMPLEXITY = {"trivial": 8, "standard": 15, "complex": 25}
+        effective_max_turns = _TURNS_BY_COMPLEXITY.get(task.complexity, 15)
+
         files_written, cost, summary = run_agent_task(
             task_description=task.description,
             workspace=workspace,
@@ -430,20 +436,40 @@ def _build_task_agent(
             files_to_create=task.files_to_create,
             files_to_modify=task.files_to_modify,
             architecture_context=architecture_context,
+            workspace_manifest=architecture_context,  # orchestrator context doubles as workspace manifest
+            allowed_paths=list(set((task.files_to_create or []) + (task.files_to_modify or []))),
+            max_turns=effective_max_turns,
+            skip_tests=skip_tests,
         )
 
         # Detect incomplete tasks: agent hit max turns without calling task_complete
         task_incomplete = "max turns reached" in summary.lower() or summary.startswith("Task incomplete")
         if task_incomplete:
-            print(f"    [Build] Task {task.id} INCOMPLETE — not committing partial work")
-            result = BuildResult(
-                task_id=task.id,
-                status="failed",
-                commits=[],
-                errors=["Task incomplete — max turns reached without calling task_complete"],
-                files_written=[FileWrite(path=f["path"], content=f["content"]) for f in files_written],
+            # Save partial work if the agent wrote real files
+            has_real_files = any(
+                f.get("content", "") and len(f.get("content", "")) > 50
+                for f in files_written
             )
-            print(f"    Status: failed (agent incomplete), Files: {len(files_written)}, Cost: ${cost:.4f}")
+            if has_real_files:
+                print(f"    [Build] Task {task.id} INCOMPLETE but has {len(files_written)} files — saving partial work")
+                result = BuildResult(
+                    task_id=task.id,
+                    status="completed",
+                    commits=[f"feat(partial): {task.description[:50]}"],
+                    errors=["Task incomplete — max turns reached, partial work saved"],
+                    files_written=[FileWrite(path=f["path"], content=f["content"]) for f in files_written],
+                )
+                print(f"    Status: completed (partial), Files: {len(files_written)}, Cost: ${cost:.4f}")
+            else:
+                print(f"    [Build] Task {task.id} INCOMPLETE — no real files written")
+                result = BuildResult(
+                    task_id=task.id,
+                    status="failed",
+                    commits=[],
+                    errors=["Task incomplete — max turns reached without producing files"],
+                    files_written=[FileWrite(path=f["path"], content=f["content"]) for f in files_written],
+                )
+                print(f"    Status: failed (agent incomplete), Files: {len(files_written)}, Cost: ${cost:.4f}")
         else:
             # Convert to BuildResult
             result = BuildResult(

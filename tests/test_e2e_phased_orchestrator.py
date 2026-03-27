@@ -175,7 +175,8 @@ class TestArchitectureContextReaches:
 
         def mock_build_fn(task, workspace, design_summary, cumulative_files,
                           review_result, verify_record, run_files, workspace_info,
-                          use_llm, llm, builder_mode, design_spec=None):
+                          use_llm, llm, builder_mode, design_spec=None,
+                          skip_tests=False):
             # Capture the orchestrator context from cumulative_files
             for fw in cumulative_files:
                 if fw.path == "__orchestrator_context__.md":

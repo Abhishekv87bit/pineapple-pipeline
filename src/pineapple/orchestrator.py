@@ -965,6 +965,9 @@ def run_phased_build(
         semaphore = threading.Semaphore(max_concurrent)
         phase_results: list[tuple[dict, float]] = []  # (result_dict, cost)
 
+        # Only the last phase runs tests — earlier phases have unresolvable imports
+        is_last_phase = (phase_idx == len(phased_task_dicts) - 1)
+
         def _run_task(task_dict: dict) -> tuple[dict, float, int]:
             """Execute a single task behind the semaphore."""
             tid = task_dict.get("id", "?")
@@ -991,6 +994,7 @@ def run_phased_build(
                     review_result, verify_record, run_files,
                     workspace_info, use_llm, llm, builder_mode,
                     design_spec,
+                    skip_tests=not is_last_phase,
                 )
                 # Process: write files to disk and commit
                 files_count = process_fn(
