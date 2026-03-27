@@ -315,19 +315,34 @@ def plan_node(state: PipelineState) -> dict:
             ],
         }
 
-    # --- Main path: call LLM (with Claude Code CLI fallback) ---
+    # --- Main path: Claude Code CLI primary, Gemini fallback ---
+    import os
+    builder_mode = os.environ.get("PINEAPPLE_BUILDER", "single_shot")
+
     try:
         user_prompt = _build_user_prompt(state)
 
         print("  [Plan] Calling LLM to generate task plan...")
-        try:
-            plan, provider, call_cost = _call_llm(_SYSTEM_PROMPT, user_prompt)
-        except Exception as gemini_err:
-            print(f"  [Plan] Gemini failed: {str(gemini_err)[:100]}")
-            print("  [Plan] Falling back to Claude Code CLI for planning...")
-            plan, provider, call_cost = _call_claude_code_planner(
-                _SYSTEM_PROMPT, user_prompt,
-            )
+        if builder_mode == "claude_code":
+            # Claude Code CLI is primary when builder is claude_code
+            try:
+                plan, provider, call_cost = _call_claude_code_planner(
+                    _SYSTEM_PROMPT, user_prompt,
+                )
+            except Exception as cc_err:
+                print(f"  [Plan] Claude Code CLI failed: {str(cc_err)[:100]}")
+                print("  [Plan] Falling back to Gemini...")
+                plan, provider, call_cost = _call_llm(_SYSTEM_PROMPT, user_prompt)
+        else:
+            # Gemini primary, Claude Code fallback
+            try:
+                plan, provider, call_cost = _call_llm(_SYSTEM_PROMPT, user_prompt)
+            except Exception as gemini_err:
+                print(f"  [Plan] Gemini failed: {str(gemini_err)[:100]}")
+                print("  [Plan] Falling back to Claude Code CLI...")
+                plan, provider, call_cost = _call_claude_code_planner(
+                    _SYSTEM_PROMPT, user_prompt,
+                )
 
         # Force approved=False — human must approve at the interrupt gate
         plan.approved = False
