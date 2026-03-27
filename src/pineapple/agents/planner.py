@@ -144,6 +144,17 @@ def _build_user_prompt(state: PipelineState) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _call_llm(system: str, user: str) -> tuple[TaskPlan, str, float]:
+    """Call the LLM via the router and return (TaskPlan, provider, cost_usd)."""
+    return call_with_retry(
+        stage="plan",
+        response_model=TaskPlan,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        max_tokens=4096,
+    )
+
+
 def _call_claude_code_planner(system: str, user: str) -> tuple[TaskPlan, str, float]:
     """Fallback: use Claude Code CLI to generate a TaskPlan when Gemini fails."""
     import subprocess
@@ -177,7 +188,7 @@ IMPORTANT: Respond with ONLY valid JSON matching this schema (no markdown, no ex
     model = os.environ.get("PINEAPPLE_CLAUDE_CODE_MODEL", "sonnet")
     proc = subprocess.run(
         [
-            "claude", "-p",
+            "claude.cmd", "-p",
             "--output-format", "json",
             "--max-turns", "3",
             "--model", model,

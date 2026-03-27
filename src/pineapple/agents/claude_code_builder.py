@@ -288,7 +288,7 @@ def run_claude_code_task(
 
     # Build the CLI command
     cmd = [
-        "claude", "-p",
+        "claude.cmd", "-p",
         "--output-format", "json",
         "--max-turns", str(effective_max_turns),
         "--model", model,
