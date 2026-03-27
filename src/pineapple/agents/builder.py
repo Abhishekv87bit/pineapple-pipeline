@@ -390,7 +390,10 @@ def _build_one_task(
         print(f"    Status: {result.status} (fallback), Files: {len(result.files_written)}")
         return result, 0.0
 
-    if builder_mode == "agent":
+    if builder_mode == "claude_code":
+        architecture_context = _extract_architecture_context(task, design_spec)
+        return _build_task_claude_code(task, workspace, design_summary, prior_context, architecture_context=architecture_context, skip_tests=skip_tests)
+    elif builder_mode == "agent":
         architecture_context = _extract_architecture_context(task, design_spec)
         return _build_task_agent(task, workspace, design_summary, prior_context, architecture_context=architecture_context, skip_tests=skip_tests)
     else:
@@ -483,6 +486,52 @@ def _build_task_agent(
         return result, cost
     except Exception as e:
         print(f"    ERROR (agent): {e}")
+        return _make_error_result(task.id, str(e)), 0.0
+
+
+def _build_task_claude_code(
+    task: Task, workspace: str, design_summary: str, prior_context: str,
+    architecture_context: str = "",
+    skip_tests: bool = False,
+) -> tuple[BuildResult, float]:
+    """Build a task via Claude Code CLI."""
+    try:
+        from pineapple.agents.claude_code_builder import run_claude_code_task
+    except ImportError as exc:
+        print(f"    Claude Code builder not available: {exc}, falling back to single-shot")
+        return _build_task_single_shot(task, design_summary, None, prior_context)
+
+    _TURNS_BY_COMPLEXITY = {"trivial": 8, "standard": 15, "complex": 25}
+    effective_max_turns = _TURNS_BY_COMPLEXITY.get(task.complexity, 15)
+    test_policy = "import_only" if skip_tests else "full"
+
+    try:
+        files_written, cost, summary = run_claude_code_task(
+            task_description=task.description,
+            workspace=workspace,
+            design_summary=design_summary,
+            prior_context=prior_context,
+            files_to_create=task.files_to_create,
+            files_to_modify=task.files_to_modify,
+            architecture_context=architecture_context,
+            workspace_manifest="",
+            max_turns=effective_max_turns,
+            test_policy=test_policy,
+        )
+
+        has_real_files = any(f.get("content", "") and len(f.get("content", "")) > 50 for f in files_written)
+
+        result = BuildResult(
+            task_id=task.id,
+            status="completed" if has_real_files else "failed",
+            commits=[f"feat: {summary[:100]}"] if has_real_files else [],
+            errors=[] if has_real_files else ["No real files produced by Claude Code"],
+            files_written=[FileWrite(path=f["path"], content=f["content"]) for f in files_written],
+        )
+        print(f"    Status: {result.status} (claude_code), Files: {len(files_written)}, Cost: ${cost:.4f}")
+        return result, cost
+    except Exception as e:
+        print(f"    ERROR (claude_code): {e}")
         return _make_error_result(task.id, str(e)), 0.0
 
 
