@@ -287,8 +287,16 @@ def _scaffold_dirs_from_architecture(design_spec: dict, worktree_path: str) -> l
     dirs_created: list[str] = []
     seen: set[str] = set()
 
-    def _collect_paths(obj: Any) -> None:
+    # Keys whose values are raw document content, not structured file paths
+    _SKIP_KEYS = {"_raw_document", "summary", "description"}
+
+    def _collect_paths(obj: Any, key: str = "") -> None:
+        if key in _SKIP_KEYS:
+            return
         if isinstance(obj, str):
+            # Skip long strings (likely prose, not file paths)
+            if len(obj) > 300:
+                return
             # Heuristic: treat as file path if it contains a slash and an extension
             if ("/" in obj or "\\" in obj) and "." in obj.split("/")[-1].split("\\")[-1]:
                 parent = str(Path(obj.replace("\\", "/")).parent)
@@ -301,8 +309,8 @@ def _scaffold_dirs_from_architecture(design_spec: dict, worktree_path: str) -> l
                     except OSError as exc:
                         print(f"  [WARN] Could not create dir {parent}: {exc}")
         elif isinstance(obj, dict):
-            for v in obj.values():
-                _collect_paths(v)
+            for k, v in obj.items():
+                _collect_paths(v, key=k)
         elif isinstance(obj, list):
             for item in obj:
                 _collect_paths(item)
