@@ -66,17 +66,52 @@ def extract_phases_from_architecture(design_spec: dict) -> list[list[str]]:
 
 
 def _phases_from_raw_document(raw: str) -> list[list[str]]:
-    """Extract phases from explicit Phase markers in the raw architecture doc."""
+    """Extract phases from explicit Phase markers in the raw architecture doc.
+
+    Handles multi-line phase blocks where SC-XX IDs appear on separate lines
+    below the Phase header.  Scans all lines between consecutive Phase headers
+    (or until a blank line / section header) to capture every component.
+    """
+    # Find all Phase header positions
+    phase_headers: list[tuple[int, int, int]] = []  # (phase_num, start_pos, end_of_header_line)
+    for match in re.finditer(
+        r"^[ \t]*Phase\s+(\d+)\s*(?:\([^)]*\))?\s*:", raw, re.IGNORECASE | re.MULTILINE,
+    ):
+        phase_num = int(match.group(1))
+        phase_headers.append((phase_num, match.start(), match.end()))
+
+    if not phase_headers:
+        return []
+
     phase_map: dict[int, list[str]] = {}
 
-    for match in _PHASE_RE.finditer(raw):
-        phase_num = int(match.group(1))
-        body = match.group(2)
-        component_ids = _COMPONENT_ID_RE.findall(body)
-        # Normalize to uppercase
-        component_ids = [cid.upper() for cid in component_ids]
-        if component_ids:
-            phase_map.setdefault(phase_num, []).extend(component_ids)
+    for i, (phase_num, _start, header_end) in enumerate(phase_headers):
+        # Block extends to the next Phase header or a section boundary (## or ```)
+        if i + 1 < len(phase_headers):
+            block_end = phase_headers[i + 1][1]
+        else:
+            # Look for the next blank-line-followed-by-non-indented-text or ```
+            rest = raw[header_end:]
+            end_match = re.search(r"\n(?:```|##|\S)", rest)
+            block_end = header_end + end_match.start() if end_match else len(raw)
+
+        block = raw[header_end:block_end]
+        component_ids = _COMPONENT_ID_RE.findall(block)
+        # Only keep IDs from the component lines, not from "depends on" annotations
+        # Strategy: first pass gets SC-XX at line start (the primary components)
+        primary_ids: list[str] = []
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            line_ids = _COMPONENT_ID_RE.findall(stripped)
+            if line_ids:
+                # First SC-XX on the line is the primary component for this phase;
+                # subsequent ones are dependency references
+                primary_ids.append(line_ids[0].upper())
+
+        if primary_ids:
+            phase_map.setdefault(phase_num, []).extend(primary_ids)
 
     if not phase_map:
         return []

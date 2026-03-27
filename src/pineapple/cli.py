@@ -215,6 +215,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
             sys.exit(1)
         initial_state: PipelineState = build_state_from_manifest(
             manifest_path,
+            resume_from=resume_from,
             run_id=run_id,
             request=args.request,
             project_name=args.project_name or "",
