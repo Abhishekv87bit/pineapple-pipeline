@@ -334,7 +334,19 @@ class LLMClient:
         try:
             if self.provider == PROVIDER_CLAUDE:
                 call_kwargs["max_tokens"] = max_tokens
-            result = self._client.messages.create(**call_kwargs)
+            # Use thread-based timeout to prevent Gemini from hanging indefinitely
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            _CALL_TIMEOUT = int(os.environ.get("PINEAPPLE_LLM_TIMEOUT", "120"))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self._client.messages.create, **call_kwargs)
+                try:
+                    result = future.result(timeout=_CALL_TIMEOUT)
+                except FuturesTimeout:
+                    raise TimeoutError(
+                        f"LLM call timed out after {_CALL_TIMEOUT}s "
+                        f"(provider={self.provider}, model={self.model}). "
+                        f"Set PINEAPPLE_LLM_TIMEOUT to increase."
+                    )
             return result
         except Exception as exc:
             error_obj = exc
