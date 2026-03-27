@@ -484,7 +484,9 @@ def call_with_retry(
         except Exception as exc:
             last_error = exc
             err_str = str(exc).lower()
-            if "429" in err_str or "resource_exhausted" in err_str or "rate" in err_str:
+            # Only retry on actual rate limits, not model-not-found or auth errors
+            is_rate_limit = ("429" in err_str or "resource_exhausted" in err_str) and "404" not in err_str and "not_found" not in err_str
+            if is_rate_limit:
                 wait = min(30 * (2 ** attempt), 120)  # 30s, 60s, 120s, 120s, 120s
                 print(f"  [LLM] Rate limited (attempt {attempt + 1}/{_RATE_LIMIT_RETRIES}), waiting {wait}s...")
                 time.sleep(wait)
