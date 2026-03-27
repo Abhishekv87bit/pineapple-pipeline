@@ -285,6 +285,74 @@ def _call_llm_chunk(
 
 
 # ---------------------------------------------------------------------------
+# Claude Code CLI reviewer
+# ---------------------------------------------------------------------------
+
+
+def _call_claude_code_reviewer(
+    system: str,
+    user: str,
+) -> tuple[ReviewResult, str, float]:
+    """Use Claude Code CLI to generate a ReviewResult when Gemini fails."""
+    import json as _json
+    import os
+    import re
+    import subprocess
+
+    prompt = f"""{system}
+
+---
+
+{user}
+
+---
+
+IMPORTANT: Respond with ONLY valid JSON matching this schema (no markdown, no explanation):
+{{
+  "verdict": "pass|retry|fail",
+  "critical_issues": ["..."],
+  "important_issues": ["..."],
+  "minor_issues": ["..."]
+}}
+"""
+
+    model = os.environ.get("PINEAPPLE_CLAUDE_CODE_MODEL", "sonnet")
+    proc = subprocess.run(
+        [
+            "claude.cmd", "-p",
+            "--output-format", "json",
+            "--max-turns", "3",
+            "--model", model,
+            "--no-session-persistence",
+        ],
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    raw = proc.stdout or ""
+    try:
+        cc_output = _json.loads(raw)
+        result_text = cc_output.get("result", "")
+        cost = cc_output.get("total_cost_usd", 0.0)
+    except (_json.JSONDecodeError, TypeError):
+        result_text = raw
+        cost = 0.0
+
+    json_match = re.search(r'\{[\s\S]*"verdict"[\s\S]*\}', result_text)
+    if json_match:
+        review_data = _json.loads(json_match.group())
+    else:
+        raise ValueError(f"Claude Code did not return valid ReviewResult JSON: {result_text[:200]}")
+
+    result = ReviewResult(**review_data)
+    return result, "claude_code", cost
+
+
+# ---------------------------------------------------------------------------
 # Chunked LLM review (parallel dispatch)
 # ---------------------------------------------------------------------------
 
@@ -453,7 +521,7 @@ def reviewer_node(state: PipelineState) -> dict:
         for c in chunks:
             print(f"    Module '{c['module']}': {c['file_count']} files, {c['lines_changed']} lines")
 
-    if use_llm:
+    if use_llm or True:  # Claude Code CLI does not require Gemini/Anthropic SDK keys
         try:
             if do_chunk:
                 print("  [Review] Dispatching chunked LLM reviews...")
@@ -466,14 +534,37 @@ def reviewer_node(state: PipelineState) -> dict:
                     architecture_doc=architecture_doc,
                 )
             else:
-                print("  [Review] Calling LLM for code review...")
-                result, provider, call_cost = _call_llm(
-                    design_spec=str(design_spec_data),
-                    build_results=str(build_results),
-                    verify_record=str(verify_record),
-                    is_lightweight=is_lightweight,
-                    architecture_doc=architecture_doc,
-                )
+                # Claude Code CLI is primary; Gemini (call_with_retry) is fallback
+                print("  [Review] Calling Claude Code CLI for code review...")
+                try:
+                    system = _SYSTEM_PROMPT
+                    if is_lightweight:
+                        system += (
+                            "\n\nIMPORTANT: This is a LIGHTWEIGHT path (bug fix / small change). "
+                            "Minimal or sparse build output is expected and acceptable. "
+                            "Do NOT flag empty or minimal results as critical issues. "
+                            "Only flag genuine implementation errors as critical."
+                        )
+                    user = _USER_PROMPT_TEMPLATE.format(
+                        design_spec=str(design_spec_data),
+                        architecture_doc=architecture_doc or "(none provided)",
+                        build_results=str(build_results),
+                        verify_record=str(verify_record),
+                    )
+                    result, provider, call_cost = _call_claude_code_reviewer(system, user)
+                except Exception as cc_err:
+                    print(f"  [Review] Claude Code CLI failed: {str(cc_err)[:100]}")
+                    if use_llm:
+                        print("  [Review] Falling back to Gemini...")
+                        result, provider, call_cost = _call_llm(
+                            design_spec=str(design_spec_data),
+                            build_results=str(build_results),
+                            verify_record=str(verify_record),
+                            is_lightweight=is_lightweight,
+                            architecture_doc=architecture_doc,
+                        )
+                    else:
+                        raise
 
             print(f"  [Review] Verdict: {result.verdict} (cost: ${call_cost:.4f})")
             print(f"    Critical: {len(result.critical_issues)}")
