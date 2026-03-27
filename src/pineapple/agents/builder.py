@@ -439,7 +439,7 @@ def _build_task_agent(
             workspace_manifest=architecture_context,  # orchestrator context doubles as workspace manifest
             allowed_paths=list(set((task.files_to_create or []) + (task.files_to_modify or []))),
             max_turns=effective_max_turns,
-            skip_tests=skip_tests,
+            test_policy="import_only" if skip_tests else "full",
         )
 
         # Detect incomplete tasks: agent hit max turns without calling task_complete

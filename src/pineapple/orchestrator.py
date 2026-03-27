@@ -780,6 +780,86 @@ def build_workspace_manifest(
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Cross-phase consistency check
+# ---------------------------------------------------------------------------
+
+
+def check_cross_phase_consistency(
+    new_code: dict[str, str],
+    all_code: dict[str, str],
+    design_spec: dict,
+) -> list[str]:
+    """Check for cross-file consistency issues after a phase completes.
+
+    Checks:
+    1. Import consistency: if file A imports from file B, verify B defines what A expects
+    2. Class/function signatures match across files (basic name check)
+    3. Architecture spec compliance: class names match the architecture doc
+
+    Returns list of issue descriptions. Empty = all good.
+    """
+    issues = []
+
+    # 1. Import consistency: check that imports resolve to real definitions
+    for fpath, content in new_code.items():
+        if not fpath.endswith(".py"):
+            continue
+        for line in content.splitlines():
+            line = line.strip()
+            if not line.startswith(("from ", "import ")):
+                continue
+            # Extract "from X import Y, Z"
+            import_match = re.match(r"from\s+([\w.]+)\s+import\s+(.+)", line)
+            if not import_match:
+                continue
+            module_path = import_match.group(1)
+            imported_names = [n.strip().split(" as ")[0] for n in import_match.group(2).split(",")]
+
+            # Find the source file in all_code
+            # Convert module path to file path (e.g., backend.app.models.module -> backend/app/models/module.py)
+            source_file = module_path.replace(".", "/") + ".py"
+            source_content = all_code.get(source_file, "")
+
+            if not source_content:
+                continue  # External import, skip
+
+            # Check each imported name exists in the source
+            for name in imported_names:
+                name = name.strip()
+                if not name or name.startswith("("):
+                    continue
+                # Look for class Name or def Name or Name = in source
+                if (f"class {name}" not in source_content
+                        and f"def {name}" not in source_content
+                        and f"{name} =" not in source_content
+                        and f"{name}:" not in source_content):
+                    issues.append(
+                        f"{fpath} imports '{name}' from {module_path}, "
+                        f"but {source_file} does not define it"
+                    )
+
+    # 2. Architecture compliance: check class names from design_spec components
+    raw_doc = design_spec.get("_raw_document", "")
+    if raw_doc:
+        # Extract class names mentioned in architecture interfaces
+        arch_classes = set(re.findall(r"class\s+(\w+)", raw_doc))
+        for fpath, content in new_code.items():
+            if not fpath.endswith(".py"):
+                continue
+            defined_classes = set(re.findall(r"class\s+(\w+)", content))
+            # Check if any architecture-expected class has a different casing
+            for dc in defined_classes:
+                for ac in arch_classes:
+                    if dc.lower() == ac.lower() and dc != ac:
+                        issues.append(
+                            f"{fpath} defines '{dc}' but architecture specifies '{ac}' (case mismatch)"
+                        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Main entry point: run_phased_build
 # ---------------------------------------------------------------------------
 
@@ -1054,7 +1134,17 @@ def run_phased_build(
         else:
             print(f"  Phase {phase_num}: all validations passed")
 
-        # 3f. Update manifest after each phase
+        # 3f. Cross-task consistency check
+        if new_code:
+            consistency_issues = check_cross_phase_consistency(
+                new_code, completed_code, design_spec,
+            )
+            if consistency_issues:
+                print(f"  Phase {phase_num}: {len(consistency_issues)} consistency issue(s):")
+                for issue in consistency_issues:
+                    print(f"    - {issue}")
+
+        # 3g. Update manifest after each phase
         if manifest_path:
             update_manifest(manifest_path, 5, "in_progress", {
                 "current_phase": phase_num,

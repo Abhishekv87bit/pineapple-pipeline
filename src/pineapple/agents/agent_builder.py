@@ -233,7 +233,7 @@ def run_agent_task(
     architecture_context: str = "",
     allowed_paths: set[str] | None = None,
     workspace_manifest: str = "",
-    skip_tests: bool = False,
+    test_policy: str = "full",
 ) -> tuple[list[dict], float, str]:
     """Run a Gemini agent conversation for a single build task.
 
@@ -255,9 +255,9 @@ def run_agent_task(
             Files written outside this set get a soft WARNING (not blocked).
         workspace_manifest: Pre-built listing of workspace files. When provided,
             replaces the default "list existing files" instruction.
-        skip_tests: When True, suppress test-running instructions. Use for
-            Phase 1-4 agents where dependencies from later phases don't exist
-            yet. Prevents test-failure spirals caused by missing imports.
+        test_policy: Controls test execution level. "full" runs full pytest
+            (Phase 5 / last phase behavior). "import_only" checks that files
+            import without errors (Phase 1-4 behavior). "none" skips all tests.
 
     Returns:
         Tuple of (files_written_dicts, cost_usd, summary).
@@ -284,11 +284,25 @@ def run_agent_task(
         "2. Write implementation files\n"
         "3. Write test files\n"
     )
-    if skip_tests:
+    if test_policy == "none":
         system += (
-            "4. Do NOT run tests — dependencies from other build phases are not yet available.\n"
-            "   Other modules you import from may not exist on disk yet. That is expected.\n"
-            "5. Call task_complete with a summary when all files are written.\n"
+            "\n\nWORKFLOW:\n"
+            "1. Read any existing files you need to modify\n"
+            "2. Write all code files\n"
+            "3. Do NOT run any tests — just write the code\n"
+            "4. Call task_complete with a summary when all files are written\n"
+        )
+    elif test_policy == "import_only":
+        system += (
+            "\n\nWORKFLOW:\n"
+            "1. Read any existing files you need to modify\n"
+            "2. Write all code files\n"
+            "3. Run a quick import check: run_command('python -c \"import importlib; "
+            "importlib.import_module(\\\"<module_path>\\\")\"\\')\n"
+            "   Replace <module_path> with the dotted path of your main file (e.g., backend.app.models.module)\n"
+            "   If the import fails, fix the syntax error and retry ONCE\n"
+            "4. Do NOT run pytest — full tests run in a later phase\n"
+            "5. Call task_complete with a summary when all files are written and imports work\n"
         )
     else:
         system += (
