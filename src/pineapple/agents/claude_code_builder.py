@@ -111,8 +111,45 @@ def _build_user_prompt(
     return "\n\n".join(parts)
 
 
+def _snapshot_workspace(workspace: str) -> dict[str, float]:
+    """Take a snapshot of all file modification times in the workspace."""
+    snapshot: dict[str, float] = {}
+    base = Path(workspace)
+    for fpath in base.rglob("*"):
+        if fpath.is_file() and ".git" not in fpath.parts and ".pineapple" not in fpath.parts:
+            rel = str(fpath.relative_to(base)).replace("\\", "/")
+            snapshot[rel] = fpath.stat().st_mtime
+    return snapshot
+
+
+def _diff_snapshots(before: dict[str, float], after: dict[str, float]) -> list[str]:
+    """Find files that are new or modified between two snapshots."""
+    changed = []
+    for path, mtime in after.items():
+        if path not in before or mtime > before[path]:
+            changed.append(path)
+    return changed
+
+
+def _collect_files_from_snapshots(
+    before: dict[str, float], after: dict[str, float], workspace: str
+) -> list[dict]:
+    """Primary file detection: snapshot-based, git-independent."""
+    files: list[dict] = []
+    base = Path(workspace)
+    for rel_path in _diff_snapshots(before, after):
+        full_path = base / rel_path
+        if full_path.is_file():
+            try:
+                content = full_path.read_text(encoding="utf-8", errors="replace")
+                files.append({"path": rel_path, "content": content})
+            except OSError:
+                pass
+    return files
+
+
 def _collect_files_from_git_diff(workspace: str) -> list[dict]:
-    """Use git diff HEAD to discover what files were written, then read them."""
+    """Fallback file detection via git diff HEAD (may miss files in parallel sessions)."""
     files: list[dict] = []
     try:
         result = subprocess.run(
@@ -301,9 +338,13 @@ def run_claude_code_task(
     # Prompt is piped via stdin (not as positional arg — avoids shell quoting
     # issues and --allowedTools eating the prompt on Windows)
 
+    # Snapshot workspace BEFORE calling claude — used for git-independent file detection
+    before_snapshot = _snapshot_workspace(workspace)
+
     # Run claude CLI
     raw_output = ""
     stderr_text = ""
+    after_snapshot: dict[str, float] = {}
     try:
         proc = subprocess.run(
             cmd,
@@ -318,10 +359,15 @@ def run_claude_code_task(
         raw_output = proc.stdout or ""
         stderr_text = proc.stderr or ""
 
+        # Snapshot AFTER the run (inside try so it happens before error handling)
+        after_snapshot = _snapshot_workspace(workspace)
+
         if proc.returncode != 0:
             print(f"      [ClaudeCode] Non-zero exit ({proc.returncode}): {stderr_text[:300]}")
-            # Try to collect any files written before the error
-            files_written = _collect_files_from_git_diff(workspace)
+            # Try to collect any files written before the error (snapshot-based, then git fallback)
+            files_written = _collect_files_from_snapshots(before_snapshot, after_snapshot, workspace)
+            if not files_written:
+                files_written = _collect_files_from_git_diff(workspace)
             if files_written:
                 summary = f"Partial: claude exited {proc.returncode} but wrote {len(files_written)} files"
                 cost = _estimate_cost(user_prompt, raw_output)
@@ -330,7 +376,10 @@ def run_claude_code_task(
 
     except subprocess.TimeoutExpired:
         print("      [ClaudeCode] Timed out after 600s — collecting partial files")
-        files_written = _collect_files_from_git_diff(workspace)
+        after_snapshot = _snapshot_workspace(workspace)
+        files_written = _collect_files_from_snapshots(before_snapshot, after_snapshot, workspace)
+        if not files_written:
+            files_written = _collect_files_from_git_diff(workspace)
         cost = _estimate_cost(user_prompt, "")
         summary = f"Timed out, {len(files_written)} files partially written"
         return files_written, cost, summary
@@ -356,12 +405,17 @@ def run_claude_code_task(
     if cost == 0.0:
         cost = _estimate_cost(user_prompt, raw_output)
 
-    # Collect files written via git diff (most reliable approach)
-    files_written = _collect_files_from_git_diff(workspace)
+    # Primary: snapshot-based file detection (git-independent, safe for parallel sessions)
+    files_written = _collect_files_from_snapshots(before_snapshot, after_snapshot, workspace)
+
+    # Fallback: git diff (catches files not reflected in snapshot for any reason)
+    if not files_written:
+        print("      [ClaudeCode] Snapshot detected no changes — falling back to git diff")
+        files_written = _collect_files_from_git_diff(workspace)
 
     if not files_written:
-        print("      [ClaudeCode] No files detected via git diff")
+        print("      [ClaudeCode] No files detected via snapshot or git diff")
         return [], cost, "No files written by Claude Code"
 
-    print(f"      [ClaudeCode] Done. Files: {len(files_written)}, Cost: ${cost:.4f}")
+    print(f"      [ClaudeCode] Done. Files: {len(files_written)} (snapshot), Cost: ${cost:.4f}")
     return files_written, cost, summary
