@@ -333,8 +333,8 @@ def _parse_design_spec(markdown: str) -> dict[str, Any]:
                 candidate = stripped.strip("`")
                 if "/" in candidate or candidate.endswith(".py") or candidate.endswith(".ts"):
                     files.append(candidate)
-            elif re.match(r"^[-*+]\s+`(.+)`", stripped):
-                inner = re.match(r"^[-*+]\s+`(.+)`", stripped).group(1)
+            elif re.match(r"^[-*+]\s+`([^`]+)`", stripped):
+                inner = re.match(r"^[-*+]\s+`([^`]+)`", stripped).group(1)
                 if "/" in inner or inner.endswith(".py") or inner.endswith(".ts"):
                     files.append(inner)
 

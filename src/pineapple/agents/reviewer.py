@@ -353,6 +353,96 @@ IMPORTANT: Respond with ONLY valid JSON matching this schema (no markdown, no ex
 
 
 # ---------------------------------------------------------------------------
+# Claude Code CLI chunk reviewer
+# ---------------------------------------------------------------------------
+
+
+def _call_claude_code_chunk(
+    module_name: str,
+    file_list: list[str],
+    design_spec: str,
+    build_results: str,
+    verify_record: str,
+    is_lightweight: bool = False,
+    architecture_doc: str = "",
+) -> tuple[ReviewResult, str, float]:
+    """Use Claude Code CLI to review a single chunk/module."""
+    import json as _json
+    import os
+    import re
+    import subprocess
+
+    system = _CHUNK_SYSTEM_PROMPT.format(module_name=module_name)
+    if is_lightweight:
+        system += (
+            "\n\nIMPORTANT: This is a LIGHTWEIGHT path (bug fix / small change). "
+            "Minimal or sparse build output is expected and acceptable. "
+            "Do NOT flag empty or minimal results as critical issues. "
+            "Only flag genuine implementation errors as critical."
+        )
+
+    user = _CHUNK_USER_PROMPT_TEMPLATE.format(
+        module_name=module_name,
+        file_list=", ".join(file_list),
+        design_spec=design_spec,
+        build_results=build_results,
+        verify_record=verify_record,
+    )
+
+    prompt = f"""{system}
+
+---
+
+{user}
+
+---
+
+IMPORTANT: Respond with ONLY valid JSON matching this schema (no markdown, no explanation):
+{{
+  "verdict": "pass|retry|fail",
+  "critical_issues": ["..."],
+  "important_issues": ["..."],
+  "minor_issues": ["..."]
+}}
+"""
+
+    model = os.environ.get("PINEAPPLE_CLAUDE_CODE_MODEL", "sonnet")
+    proc = subprocess.run(
+        [
+            "claude.cmd", "-p",
+            "--output-format", "json",
+            "--max-turns", "3",
+            "--model", model,
+            "--no-session-persistence",
+        ],
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    raw = proc.stdout or ""
+    try:
+        cc_output = _json.loads(raw)
+        result_text = cc_output.get("result", "")
+        cost = cc_output.get("total_cost_usd", 0.0)
+    except (_json.JSONDecodeError, TypeError):
+        result_text = raw
+        cost = 0.0
+
+    json_match = re.search(r'\{[\s\S]*"verdict"[\s\S]*\}', result_text)
+    if json_match:
+        review_data = _json.loads(json_match.group())
+    else:
+        raise ValueError(f"Claude Code did not return valid ReviewResult JSON: {result_text[:200]}")
+
+    result = ReviewResult(**review_data)
+    return result, "claude_code", cost
+
+
+# ---------------------------------------------------------------------------
 # Chunked LLM review (parallel dispatch)
 # ---------------------------------------------------------------------------
 
@@ -375,15 +465,28 @@ def _review_chunked_llm(
     def _review_one_chunk(chunk: dict) -> dict[str, Any]:
         module = chunk["module"]
         file_paths = [f.get("path", "") for f in chunk["files"]]
-        result, provider, cost = _call_llm_chunk(
-            module_name=module,
-            file_list=file_paths,
-            design_spec=design_spec,
-            build_results=build_results,
-            verify_record=verify_record,
-            is_lightweight=is_lightweight,
-            architecture_doc=architecture_doc,
-        )
+        try:
+            result, provider, cost = _call_claude_code_chunk(
+                module_name=module,
+                file_list=file_paths,
+                design_spec=design_spec,
+                build_results=build_results,
+                verify_record=verify_record,
+                is_lightweight=is_lightweight,
+                architecture_doc=architecture_doc,
+            )
+        except Exception as cc_err:
+            print(f"    [Chunk: {module}] Claude Code CLI failed: {str(cc_err)[:50]}")
+            print(f"    [Chunk: {module}] Falling back to Gemini...")
+            result, provider, cost = _call_llm_chunk(
+                module_name=module,
+                file_list=file_paths,
+                design_spec=design_spec,
+                build_results=build_results,
+                verify_record=verify_record,
+                is_lightweight=is_lightweight,
+                architecture_doc=architecture_doc,
+            )
         return {"module": module, "result": result.model_dump(), "provider": provider, "cost": cost}
 
     # Dispatch in parallel using ThreadPoolExecutor
